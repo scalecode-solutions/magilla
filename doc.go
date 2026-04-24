@@ -124,17 +124,28 @@
 //
 // Concurrency
 //
-// Connections support one concurrent reader and one concurrent writer.
+// Write methods are safe for concurrent use. WriteMessage, WriteJSON,
+// WritePreparedMessage and NextWriter acquire an internal write mutex and
+// respect the current write deadline while doing so - a slow writer does
+// not starve another goroutine past its own deadline.
 //
-// Applications are responsible for ensuring that no more than one goroutine
-// calls the write methods (NextWriter, SetWriteDeadline, WriteMessage,
-// WriteJSON, EnableWriteCompression, SetCompressionLevel) concurrently and
-// that no more than one goroutine calls the read methods (NextReader,
-// SetReadDeadline, ReadMessage, ReadJSON, SetPongHandler, SetPingHandler)
-// concurrently.
+// NextWriter holds the write mutex for the lifetime of the returned writer
+// and releases it on Close. Applications MUST call Close (directly or via
+// defer) or subsequent writes on the connection - from this goroutine or
+// any other - will deadlock. The legacy shortcut of calling NextWriter a
+// second time to implicitly close the previous writer is no longer
+// supported; call Close explicitly.
 //
-// The Close and WriteControl methods can be called concurrently with all other
-// methods.
+// WriteControl is out-of-band: it uses a separate inner mutex so control
+// frames (ping/pong/close) can be interleaved between the data frames of
+// an active streaming writer, as permitted by RFC 6455 section 5.5.
+//
+// Read methods are NOT safe for concurrent use. Applications are
+// responsible for ensuring that no more than one goroutine calls the read
+// methods (NextReader, SetReadDeadline, ReadMessage, ReadJSON,
+// SetPongHandler, SetPingHandler) concurrently.
+//
+// The Close method can be called concurrently with all other methods.
 //
 // Origin Considerations
 //

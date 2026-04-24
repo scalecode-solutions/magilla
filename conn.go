@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -244,13 +245,24 @@ type Conn struct {
 	subprotocol string
 
 	// Write fields
-	mu            chan struct{} // used as mutex to protect write to conn
+	//
+	// writeMu is the outer write mutex. It is held for the entire lifetime
+	// of a public write operation (WriteMessage, WriteJSON,
+	// WritePreparedMessage, or a NextWriter from NextWriter() to
+	// messageWriter.Close()) so concurrent callers are safely serialized.
+	// Acquisition respects the current writeDeadline; a slow predecessor
+	// does not starve a caller past its own deadline (fixes #704).
+	//
+	// mu is the inner mutex. It is held only around c.conn.Write so that
+	// WriteControl can interleave control frames between data frames of an
+	// active streaming writer (RFC 6455 §5.5).
+	writeMu       chan struct{} // outer mutex: serialize public write ops
+	mu            chan struct{} // inner mutex: around c.conn.Write
 	writeBuf      []byte        // frame is constructed in this buffer.
 	writePool     BufferPool
 	writeBufSize  int
-	writeDeadline time.Time
+	writeDeadline atomic.Value // time.Time; read/written concurrently
 	writer        io.WriteCloser // the current writer returned to the application
-	isWriting     bool           // for best-effort concurrent write detection
 
 	writeErrMu sync.Mutex
 	writeErr   error
@@ -304,11 +316,14 @@ func newConn(conn net.Conn, isServer bool, readBufferSize, writeBufferSize int, 
 
 	mu := make(chan struct{}, 1)
 	mu <- struct{}{}
+	writeMu := make(chan struct{}, 1)
+	writeMu <- struct{}{}
 	c := &Conn{
 		isServer:               isServer,
 		br:                     br,
 		conn:                   conn,
 		mu:                     mu,
+		writeMu:                writeMu,
 		readFinal:              true,
 		writeBuf:               writeBuf,
 		writePool:              writeBufferPool,
@@ -316,6 +331,9 @@ func newConn(conn net.Conn, isServer bool, readBufferSize, writeBufferSize int, 
 		enableWriteCompression: true,
 		compressionLevel:       defaultCompressionLevel,
 	}
+	// Seed the write deadline with the zero value so reads never observe a
+	// nil interface. Store the underlying time.Time, not a pointer.
+	c.writeDeadline.Store(time.Time{})
 	c.SetCloseHandler(nil)
 	c.SetPingHandler(nil)
 	c.SetPongHandler(nil)
@@ -355,6 +373,50 @@ func (c *Conn) RemoteAddr() net.Addr {
 }
 
 // Write methods
+
+// acquireWriteMu acquires the outer write mutex, respecting deadline. It is
+// called at the entry point of every public write operation; the returned
+// release function must be called to unlock. If deadline is zero, the
+// acquire blocks indefinitely. If deadline is in the past or passes before
+// the lock is available, errWriteTimeout is returned.
+//
+// This intentionally mirrors the deadline-aware acquire pattern in
+// WriteControl so a slow writer cannot starve another goroutine past its
+// own deadline (#704).
+func (c *Conn) acquireWriteMu(deadline time.Time) error {
+	if deadline.IsZero() {
+		<-c.writeMu
+		return nil
+	}
+	d := time.Until(deadline)
+	if d <= 0 {
+		return errWriteTimeout
+	}
+	select {
+	case <-c.writeMu:
+		return nil
+	default:
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-c.writeMu:
+		return nil
+	case <-timer.C:
+		return errWriteTimeout
+	}
+}
+
+// releaseWriteMu releases the outer write mutex acquired by acquireWriteMu.
+func (c *Conn) releaseWriteMu() {
+	c.writeMu <- struct{}{}
+}
+
+// getWriteDeadline returns the current write deadline, stored atomically.
+func (c *Conn) getWriteDeadline() time.Time {
+	v, _ := c.writeDeadline.Load().(time.Time)
+	return v
+}
 
 func (c *Conn) writeFatal(err error) error {
 	c.writeErrMu.Lock()
@@ -516,17 +578,26 @@ func (c *Conn) beginMessage(mw *messageWriter, messageType int) error {
 	return nil
 }
 
-// NextWriter returns a writer for the next message to send. The writer's Close
-// method flushes the complete message to the network.
+// NextWriter returns a writer for the next message to send. The writer's
+// Close method flushes the complete message to the network.
 //
-// There can be at most one open writer on a connection. NextWriter closes the
-// previous writer if the application has not already done so.
+// NextWriter acquires the connection's write lock and holds it until Close
+// is called on the returned writer. Applications MUST call Close (directly
+// or via defer) or subsequent writes on the connection — from this
+// goroutine or any other — will deadlock waiting for the lock.
 //
-// All message types (TextMessage, BinaryMessage, CloseMessage, PingMessage and
-// PongMessage) are supported.
+// Safe to call concurrently from multiple goroutines; calls are serialized.
+// Acquire respects the current write deadline (#704).
+//
+// All message types (TextMessage, BinaryMessage, CloseMessage, PingMessage
+// and PongMessage) are supported.
 func (c *Conn) NextWriter(messageType int) (io.WriteCloser, error) {
+	if err := c.acquireWriteMu(c.getWriteDeadline()); err != nil {
+		return nil, err
+	}
 	var mw messageWriter
 	if err := c.beginMessage(&mw, messageType); err != nil {
+		c.releaseWriteMu()
 		return nil, err
 	}
 	c.writer = &mw
@@ -557,6 +628,11 @@ func (w *messageWriter) endMessage(err error) error {
 		c.writePool.Put(writePoolData{buf: c.writeBuf})
 		c.writeBuf = nil
 	}
+	// Release the outer write mutex that was acquired by NextWriter /
+	// WriteMessage fast-path / WritePreparedMessage. endMessage is called
+	// exactly once per messageWriter (the w.err guard above enforces this)
+	// so this balances the single acquire on the entry-point side.
+	c.releaseWriteMu()
 	return err
 }
 
@@ -618,21 +694,11 @@ func (w *messageWriter) flushFrame(final bool, extra []byte) error {
 		}
 	}
 
-	// Write the buffers to the connection with best-effort detection of
-	// concurrent writes. See the concurrency section in the package
-	// documentation for more info.
-
-	if c.isWriting {
-		panic("concurrent write to websocket connection")
-	}
-	c.isWriting = true
-
-	err := c.write(w.frameType, c.writeDeadline, c.writeBuf[framePos:w.pos], extra)
-
-	if !c.isWriting {
-		panic("concurrent write to websocket connection")
-	}
-	c.isWriting = false
+	// Write the buffers to the connection. The outer writeMu (held by the
+	// caller since NextWriter / WriteMessage acquired it) already
+	// serializes writers; c.write takes the inner mu around the final
+	// c.conn.Write so WriteControl can interleave between frames.
+	err := c.write(w.frameType, c.getWriteDeadline(), c.writeBuf[framePos:w.pos], extra)
 
 	if err != nil {
 		return w.endMessage(err)
@@ -741,6 +807,9 @@ func (w *messageWriter) Close() error {
 }
 
 // WritePreparedMessage writes prepared message into connection.
+//
+// Safe to call concurrently from multiple goroutines; calls are serialized
+// internally and respect the write deadline during lock acquire.
 func (c *Conn) WritePreparedMessage(pm *PreparedMessage) error {
 	frameType, frameData, err := pm.frame(prepareKey{
 		isServer:         c.isServer,
@@ -750,27 +819,30 @@ func (c *Conn) WritePreparedMessage(pm *PreparedMessage) error {
 	if err != nil {
 		return err
 	}
-	if c.isWriting {
-		panic("concurrent write to websocket connection")
+	deadline := c.getWriteDeadline()
+	if err := c.acquireWriteMu(deadline); err != nil {
+		return err
 	}
-	c.isWriting = true
-	err = c.write(frameType, c.writeDeadline, frameData, nil)
-	if !c.isWriting {
-		panic("concurrent write to websocket connection")
-	}
-	c.isWriting = false
-	return err
+	defer c.releaseWriteMu()
+	return c.write(frameType, deadline, frameData, nil)
 }
 
 // WriteMessage is a helper method for getting a writer using NextWriter,
 // writing the message and closing the writer.
+//
+// Safe to call concurrently from multiple goroutines; calls are serialized
+// internally and respect the write deadline during lock acquire (#704).
 func (c *Conn) WriteMessage(messageType int, data []byte) error {
 
 	if c.isServer && (c.newCompressionWriter == nil || !c.enableWriteCompression) {
-		// Fast path with no allocations and single frame.
-
+		// Fast path with no allocations and single frame. Acquire writeMu
+		// explicitly; endMessage (called by flushFrame) releases it.
+		if err := c.acquireWriteMu(c.getWriteDeadline()); err != nil {
+			return err
+		}
 		var mw messageWriter
 		if err := c.beginMessage(&mw, messageType); err != nil {
+			c.releaseWriteMu()
 			return err
 		}
 		n := copy(c.writeBuf[mw.pos:], data)
@@ -779,6 +851,7 @@ func (c *Conn) WriteMessage(messageType int, data []byte) error {
 		return mw.flushFrame(true, data)
 	}
 
+	// Slow path: NextWriter handles lock acquisition; Close releases it.
 	w, err := c.NextWriter(messageType)
 	if err != nil {
 		return err
@@ -790,11 +863,14 @@ func (c *Conn) WriteMessage(messageType int, data []byte) error {
 }
 
 // SetWriteDeadline sets the write deadline on the underlying network
-// connection. After a write has timed out, the websocket state is corrupt and
-// all future writes will return an error. A zero value for t means writes will
-// not time out.
+// connection. After a write has timed out, the websocket state is corrupt
+// and all future writes will return an error. A zero value for t means
+// writes will not time out.
+//
+// SetWriteDeadline is safe to call concurrently with other methods; the
+// deadline is stored atomically.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
-	c.writeDeadline = t
+	c.writeDeadline.Store(t)
 	return nil
 }
 

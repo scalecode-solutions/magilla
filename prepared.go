@@ -75,15 +75,19 @@ func (pm *PreparedMessage) frame(key prepareKey) (int, []byte, error) {
 		// the frame.
 		mu := make(chan struct{}, 1)
 		mu <- struct{}{}
+		writeMu := make(chan struct{}, 1)
+		writeMu <- struct{}{}
 		var nc prepareConn
 		c := &Conn{
 			conn:                   &nc,
 			mu:                     mu,
+			writeMu:                writeMu,
 			isServer:               key.isServer,
 			compressionLevel:       key.compressionLevel,
 			enableWriteCompression: true,
 			writeBuf:               make([]byte, defaultWriteBufferSize+maxFrameHeaderSize),
 		}
+		c.writeDeadline.Store(time.Time{})
 		if key.compress {
 			c.newCompressionWriter = compressNoContextTakeover
 		}
