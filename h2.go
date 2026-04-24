@@ -417,8 +417,8 @@ func (d *Dialer) dialHTTP2(
 	if len(d.Subprotocols) > 0 {
 		req.Header["Sec-WebSocket-Protocol"] = []string{strings.Join(d.Subprotocols, ", ")}
 	}
-	if d.EnableCompression {
-		req.Header["Sec-WebSocket-Extensions"] = []string{"permessage-deflate; server_no_context_takeover; client_no_context_takeover"}
+	if offer := compressionOfferHeader(effectiveCompressionMode(d.CompressionMode, d.EnableCompression)); offer != "" {
+		req.Header["Sec-WebSocket-Extensions"] = []string{offer}
 	}
 	// Copy caller-supplied headers. Validation matches the h1 path except
 	// that Upgrade / Connection / Sec-WebSocket-Key are rejected as nonsense
@@ -501,22 +501,35 @@ func (d *Dialer) dialHTTP2(
 		}
 	}
 
-	// Compression negotiation — identical parsing to the h1 path.
-	compress := false
-	if d.EnableCompression {
+	// Compression negotiation — same parser as the h1 path, including
+	// per-direction context-takeover state.
+	mode := effectiveCompressionMode(d.CompressionMode, d.EnableCompression)
+	var (
+		compress      bool
+		readTakeover  bool
+		writeTakeover bool
+	)
+	if mode != CompressionModeDisabled {
 		for _, ext := range parseExtensions(resp.Header) {
 			if ext[""] != "permessage-deflate" {
 				continue
 			}
-			_, snct := ext["server_no_context_takeover"]
-			_, cnct := ext["client_no_context_takeover"]
-			if !snct || !cnct {
+			p := parsePMDeflate(ext)
+			if !p.windowBitsValid {
+				_ = pw.Close()
+				streamCancel()
+				_ = resp.Body.Close()
+				return nil, resp, errInvalidCompression
+			}
+			if mode == CompressionModeNoContextTakeover && (!p.serverNoContextTakeover || !p.clientNoContextTakeover) {
 				_ = pw.Close()
 				streamCancel()
 				_ = resp.Body.Close()
 				return nil, resp, errInvalidCompression
 			}
 			compress = true
+			readTakeover = mode == CompressionModeContextTakeover && !p.serverNoContextTakeover
+			writeTakeover = mode == CompressionModeContextTakeover && !p.clientNoContextTakeover
 			break
 		}
 	}
@@ -536,8 +549,18 @@ func (d *Dialer) dialHTTP2(
 	c.disableMask = d.DisableClientMask
 	c.subprotocol = resp.Header.Get("Sec-WebSocket-Protocol")
 	if compress {
-		c.newCompressionWriter = compressNoContextTakeover
-		c.newDecompressionReader = decompressNoContextTakeover
+		if writeTakeover {
+			c.writeCompressFactory = &contextTakeoverWriterFactory{}
+			c.newCompressionWriter = c.writeCompressFactory.newCompressionWriter
+		} else {
+			c.newCompressionWriter = compressNoContextTakeover
+		}
+		if readTakeover {
+			c.readDecompressFactory = &contextTakeoverReaderFactory{}
+			c.newDecompressionReader = c.readDecompressFactory.newDecompressionReader
+		} else {
+			c.newDecompressionReader = decompressNoContextTakeover
+		}
 	}
 	// Swap the response body so callers see an empty reader like the h1
 	// path does (the real body is owned by streamConn now). resp.TLS was
@@ -584,13 +607,26 @@ func (u *Upgrader) upgradeHTTP2(w http.ResponseWriter, r *http.Request, response
 
 	subprotocol := u.selectSubprotocol(r, responseHeader)
 
-	var compress bool
-	if u.EnableCompression {
+	mode := effectiveCompressionMode(u.CompressionMode, u.EnableCompression)
+	var (
+		compress            bool
+		serverWriteTakeover bool
+		clientWriteTakeover bool
+	)
+	if mode != CompressionModeDisabled {
 		for _, ext := range parseExtensions(r.Header) {
 			if ext[""] != "permessage-deflate" {
 				continue
 			}
+			p := parsePMDeflate(ext)
+			if !p.windowBitsValid {
+				break
+			}
 			compress = true
+			if mode == CompressionModeContextTakeover {
+				serverWriteTakeover = !p.serverNoContextTakeover
+				clientWriteTakeover = !p.clientNoContextTakeover
+			}
 			break
 		}
 	}
@@ -601,7 +637,14 @@ func (u *Upgrader) upgradeHTTP2(w http.ResponseWriter, r *http.Request, response
 		respH.Set("Sec-WebSocket-Protocol", subprotocol)
 	}
 	if compress {
-		respH.Set("Sec-WebSocket-Extensions", "permessage-deflate; server_no_context_takeover; client_no_context_takeover")
+		ext := "permessage-deflate"
+		if !serverWriteTakeover {
+			ext += "; server_no_context_takeover"
+		}
+		if !clientWriteTakeover {
+			ext += "; client_no_context_takeover"
+		}
+		respH.Set("Sec-WebSocket-Extensions", ext)
 	}
 	for k, vs := range responseHeader {
 		if k == "Sec-Websocket-Protocol" {
@@ -639,8 +682,18 @@ func (u *Upgrader) upgradeHTTP2(w http.ResponseWriter, r *http.Request, response
 	c := newConn(streamConn, true, u.ReadBufferSize, u.WriteBufferSize, u.WriteBufferPool, nil, nil)
 	c.subprotocol = subprotocol
 	if compress {
-		c.newCompressionWriter = compressNoContextTakeover
-		c.newDecompressionReader = decompressNoContextTakeover
+		if serverWriteTakeover {
+			c.writeCompressFactory = &contextTakeoverWriterFactory{}
+			c.newCompressionWriter = c.writeCompressFactory.newCompressionWriter
+		} else {
+			c.newCompressionWriter = compressNoContextTakeover
+		}
+		if clientWriteTakeover {
+			c.readDecompressFactory = &contextTakeoverReaderFactory{}
+			c.newDecompressionReader = c.readDecompressFactory.newDecompressionReader
+		} else {
+			c.newDecompressionReader = decompressNoContextTakeover
+		}
 	}
 	return c, nil
 }

@@ -125,11 +125,17 @@ type Dialer struct {
 	// Subprotocols specifies the client's requested subprotocols.
 	Subprotocols []string
 
-	// EnableCompression specifies if the client should attempt to negotiate
-	// per message compression (RFC 7692). Setting this value to true does not
-	// guarantee that compression will be supported. Currently only "no context
-	// takeover" modes are supported.
+	// EnableCompression specifies if the client should attempt to
+	// negotiate per-message compression (RFC 7692). Setting true without
+	// setting CompressionMode selects CompressionModeNoContextTakeover.
+	// This field is kept for backward compatibility; new code should
+	// set CompressionMode directly.
 	EnableCompression bool
+
+	// CompressionMode selects the permessage-deflate variant to
+	// negotiate. See CompressionMode for semantics. The zero value
+	// defers to EnableCompression.
+	CompressionMode CompressionMode
 
 	// Jar specifies the cookie jar.
 	// If Jar is nil, cookies are not sent in requests and ignored
@@ -309,8 +315,8 @@ func (d *Dialer) DialContext(ctx context.Context, urlStr string, requestHeader h
 		}
 	}
 
-	if d.EnableCompression {
-		req.Header["Sec-WebSocket-Extensions"] = []string{"permessage-deflate; server_no_context_takeover; client_no_context_takeover"}
+	if offer := compressionOfferHeader(effectiveCompressionMode(d.CompressionMode, d.EnableCompression)); offer != "" {
+		req.Header["Sec-WebSocket-Extensions"] = []string{offer}
 	}
 
 	if d.HandshakeTimeout != 0 {
@@ -440,17 +446,42 @@ func (d *Dialer) DialContext(ctx context.Context, urlStr string, requestHeader h
 		return nil, resp, ErrBadHandshake
 	}
 
+	mode := effectiveCompressionMode(d.CompressionMode, d.EnableCompression)
 	for _, ext := range parseExtensions(resp.Header) {
 		if ext[""] != "permessage-deflate" {
 			continue
 		}
-		_, snct := ext["server_no_context_takeover"]
-		_, cnct := ext["client_no_context_takeover"]
-		if !snct || !cnct {
+		p := parsePMDeflate(ext)
+		if !p.windowBitsValid {
 			return nil, resp, errInvalidCompression
 		}
-		conn.newCompressionWriter = compressNoContextTakeover
-		conn.newDecompressionReader = decompressNoContextTakeover
+		// Determine per-direction takeover:
+		//  read  (server->client, our incoming) uses takeover iff we
+		//   asked for it AND the response lacks server_no_context_takeover
+		//  write (client->server, our outgoing) uses takeover iff we
+		//   asked for it AND the response lacks client_no_context_takeover
+		readTakeover := mode == CompressionModeContextTakeover && !p.serverNoContextTakeover
+		writeTakeover := mode == CompressionModeContextTakeover && !p.clientNoContextTakeover
+
+		// Legacy invariant preserved for NoContextTakeover: the server
+		// is expected to echo both params. If it didn't, treat as an
+		// invalid compression response.
+		if mode == CompressionModeNoContextTakeover && (!p.serverNoContextTakeover || !p.clientNoContextTakeover) {
+			return nil, resp, errInvalidCompression
+		}
+
+		if writeTakeover {
+			conn.writeCompressFactory = &contextTakeoverWriterFactory{}
+			conn.newCompressionWriter = conn.writeCompressFactory.newCompressionWriter
+		} else {
+			conn.newCompressionWriter = compressNoContextTakeover
+		}
+		if readTakeover {
+			conn.readDecompressFactory = &contextTakeoverReaderFactory{}
+			conn.newDecompressionReader = conn.readDecompressFactory.newDecompressionReader
+		} else {
+			conn.newDecompressionReader = decompressNoContextTakeover
+		}
 		break
 	}
 

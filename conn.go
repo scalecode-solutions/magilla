@@ -276,6 +276,14 @@ type Conn struct {
 	enableWriteCompression bool
 	compressionLevel       int
 	newCompressionWriter   func(io.WriteCloser, int) io.WriteCloser
+	// writeCompressFactory / readDecompressFactory hold per-Conn
+	// persistent state for permessage-deflate with context takeover.
+	// When non-nil, newCompressionWriter / newDecompressionReader point
+	// at the factory's method so per-message callers get a wrapper that
+	// shares the persistent DEFLATE state. When nil, the pool-backed
+	// no-takeover functions are used.
+	writeCompressFactory  *contextTakeoverWriterFactory
+	readDecompressFactory *contextTakeoverReaderFactory
 
 	// Read fields
 	reader  io.ReadCloser // the current reader returned to the application
@@ -896,7 +904,17 @@ func (w *messageWriter) Close() error {
 //
 // Safe to call concurrently from multiple goroutines; calls are serialized
 // internally and respect the write deadline during lock acquire.
+//
+// WritePreparedMessage returns ErrPreparedMessageContextTakeover if this
+// connection has context-takeover compression active. PreparedMessage
+// caches a compressed frame computed against an empty DEFLATE dictionary,
+// which cannot be correctly decoded on a connection with a per-connection
+// shared dictionary.
 func (c *Conn) WritePreparedMessage(pm *PreparedMessage) error {
+	if c.writeCompressFactory != nil &&
+		c.enableWriteCompression && isData(pm.messageType) {
+		return ErrPreparedMessageContextTakeover
+	}
 	frameType, frameData, err := pm.frame(prepareKey{
 		isServer:         c.isServer,
 		compress:         c.newCompressionWriter != nil && c.enableWriteCompression && isData(pm.messageType),

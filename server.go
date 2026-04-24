@@ -79,11 +79,27 @@ type Upgrader struct {
 	// prevent cross-site request forgery.
 	CheckOrigin func(r *http.Request) bool
 
-	// EnableCompression specify if the server should attempt to negotiate per
-	// message compression (RFC 7692). Setting this value to true does not
-	// guarantee that compression will be supported. Currently only "no context
-	// takeover" modes are supported.
+	// EnableCompression specifies if the server should attempt to
+	// negotiate per-message compression (RFC 7692). Setting true without
+	// setting CompressionMode selects CompressionModeNoContextTakeover.
+	// This field is kept for backward compatibility; new code should
+	// set CompressionMode directly.
 	EnableCompression bool
+
+	// CompressionMode selects the permessage-deflate variant to
+	// negotiate. See CompressionMode for semantics. The zero value
+	// defers to EnableCompression.
+	CompressionMode CompressionMode
+}
+
+func effectiveCompressionMode(m CompressionMode, enable bool) CompressionMode {
+	if m != CompressionModeDefault {
+		return m
+	}
+	if enable {
+		return CompressionModeNoContextTakeover
+	}
+	return CompressionModeDisabled
 }
 
 func (u *Upgrader) returnError(w http.ResponseWriter, r *http.Request, status int, reason string) (*Conn, error) {
@@ -184,14 +200,36 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 
 	subprotocol := u.selectSubprotocol(r, responseHeader)
 
-	// Negotiate PMCE
-	var compress bool
-	if u.EnableCompression {
+	// Negotiate permessage-deflate (RFC 7692). Walk the client's
+	// Sec-WebSocket-Extensions list; accept the first permessage-deflate
+	// offer whose windowBits values are all 15 (or absent). Per-direction
+	// takeover is computed from the requested mode and the client's
+	// no-takeover hints.
+	mode := effectiveCompressionMode(u.CompressionMode, u.EnableCompression)
+	var (
+		compress         bool
+		serverWriteTakeover bool
+		clientWriteTakeover bool
+	)
+	if mode != CompressionModeDisabled {
 		for _, ext := range parseExtensions(r.Header) {
 			if ext[""] != "permessage-deflate" {
 				continue
 			}
+			p := parsePMDeflate(ext)
+			if !p.windowBitsValid {
+				// Decline this offer. RFC 7692 §7.1.2 allows us to
+				// simply ignore an offer we can't honor; the handshake
+				// proceeds without compression. Further offers are
+				// also ignored — this is simpler than picking a
+				// secondary and matches coder/websocket behavior.
+				break
+			}
 			compress = true
+			if mode == CompressionModeContextTakeover {
+				serverWriteTakeover = !p.serverNoContextTakeover
+				clientWriteTakeover = !p.clientNoContextTakeover
+			}
 			break
 		}
 	}
@@ -240,8 +278,20 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 	c.subprotocol = subprotocol
 
 	if compress {
-		c.newCompressionWriter = compressNoContextTakeover
-		c.newDecompressionReader = decompressNoContextTakeover
+		// Server outgoing (= server->client) writes.
+		if serverWriteTakeover {
+			c.writeCompressFactory = &contextTakeoverWriterFactory{}
+			c.newCompressionWriter = c.writeCompressFactory.newCompressionWriter
+		} else {
+			c.newCompressionWriter = compressNoContextTakeover
+		}
+		// Server incoming (= client->server) reads.
+		if clientWriteTakeover {
+			c.readDecompressFactory = &contextTakeoverReaderFactory{}
+			c.newDecompressionReader = c.readDecompressFactory.newDecompressionReader
+		} else {
+			c.newDecompressionReader = decompressNoContextTakeover
+		}
 	}
 
 	// Use larger of hijacked buffer and connection write buffer for header.
@@ -260,7 +310,17 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 		p = append(p, "\r\n"...)
 	}
 	if compress {
-		p = append(p, "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n"...)
+		p = append(p, "Sec-WebSocket-Extensions: permessage-deflate"...)
+		// Emit the no-takeover params that match the direction state we
+		// committed to. Omitting a param implies that direction uses
+		// context takeover.
+		if !serverWriteTakeover {
+			p = append(p, "; server_no_context_takeover"...)
+		}
+		if !clientWriteTakeover {
+			p = append(p, "; client_no_context_takeover"...)
+		}
+		p = append(p, "\r\n"...)
 	}
 	for k, vs := range responseHeader {
 		if k == "Sec-Websocket-Protocol" {

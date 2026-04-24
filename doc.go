@@ -232,12 +232,33 @@
 //
 //  conn.EnableWriteCompression(false)
 //
-// Currently this package does not support compression with "context takeover".
-// This means that messages must be compressed and decompressed in isolation,
-// without retaining sliding window or dictionary state across messages. For
-// more details refer to RFC 7692.
+// Context takeover
 //
-// Use of compression is experimental and may result in decreased performance.
+// Magilla supports both modes of permessage-deflate defined in RFC 7692:
+//
+//  - CompressionModeNoContextTakeover (the default when EnableCompression
+//    is true): the LZ77 dictionary is reset between every message. Memory
+//    footprint is minimal (pooled per-message allocation).
+//  - CompressionModeContextTakeover: the LZ77 dictionary persists across
+//    messages on a given connection. For repetitive payloads (JSON deltas,
+//    telemetry, chat) this dramatically improves compression ratio at the
+//    cost of ~600 KiB to 1.2 MiB per connection of flate.Writer state.
+//
+// Select the mode on Dialer.CompressionMode or Upgrader.CompressionMode.
+// Backward compatibility: a zero CompressionMode plus EnableCompression=true
+// selects NoContextTakeover, matching the legacy behavior.
+//
+// Context takeover has two constraints worth knowing:
+//
+//  - Any server_max_window_bits or client_max_window_bits parameter with a
+//    value other than 15 causes the handshake to decline the extension
+//    (Go's compress/flate hard-codes the 15-bit sliding window and cannot
+//    honor smaller values).
+//  - WritePreparedMessage is incompatible with context takeover and
+//    returns ErrPreparedMessageContextTakeover. Prepared messages cache
+//    frames computed against an empty dictionary, which cannot be
+//    correctly decoded on a connection whose dictionary state is shared
+//    across messages.
 //
 // HTTP/2 support (RFC 8441)
 //
