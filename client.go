@@ -213,13 +213,6 @@ func (d *Dialer) DialContext(ctx context.Context, urlStr string, requestHeader h
 	}
 	req = req.WithContext(ctx)
 
-	// Set the cookies present in the cookie jar of the dialer
-	if d.Jar != nil {
-		for _, cookie := range d.Jar.Cookies(u) {
-			req.AddCookie(cookie)
-		}
-	}
-
 	// Set the request headers using the capitalization for names and values in
 	// RFC examples. Although the capitalization shouldn't matter, there are
 	// servers that depend on it. The Header.Set method is not used because the
@@ -248,6 +241,16 @@ func (d *Dialer) DialContext(ctx context.Context, urlStr string, requestHeader h
 			req.Header["Sec-WebSocket-Protocol"] = vs
 		default:
 			req.Header[k] = vs
+		}
+	}
+
+	// Apply cookies from the dialer's jar after copying caller-supplied
+	// headers so a manually-set Cookie header and jar cookies are merged
+	// rather than the jar silently overwriting the caller's value. AddCookie
+	// appends to an existing Cookie header per RFC 6265 §5.4.
+	if d.Jar != nil {
+		for _, cookie := range d.Jar.Cookies(u) {
+			req.AddCookie(cookie)
 		}
 	}
 
