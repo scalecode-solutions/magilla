@@ -353,7 +353,7 @@ type brNetConn struct {
 
 func (b *brNetConn) Read(p []byte) (n int, err error) {
 	if b.br != nil {
-		// Limit read to buferred data.
+		// Limit read to buffered data.
 		if n := b.br.Buffered(); len(p) > n {
 			p = p[:n]
 		}

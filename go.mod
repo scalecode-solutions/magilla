@@ -1,9 +1,5 @@
-module github.com/gorilla/websocket
+module github.com/scalecode-solutions/websocket
 
-go 1.20
+go 1.26
 
-retract (
-    v1.5.2 // tag accidentally overwritten
-)
-
-require golang.org/x/net v0.26.0
+require golang.org/x/net v0.53.0

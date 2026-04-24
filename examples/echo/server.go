@@ -3,7 +3,6 @@
 // license that can be found in the LICENSE file.
 
 //go:build ignore
-// +build ignore
 
 package main
 
@@ -13,7 +12,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/gorilla/websocket"
+	"github.com/scalecode-solutions/websocket"
 )
 
 var addr = flag.String("addr", "localhost:8080", "http service address")

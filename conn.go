@@ -227,9 +227,9 @@ func isValidReceivedCloseCode(code int) bool {
 // interface.  The type of the value stored in a pool is not specified.
 type BufferPool interface {
 	// Get gets a value from the pool or returns nil if the pool is empty.
-	Get() interface{}
+	Get() any
 	// Put adds a value to the pool.
-	Put(interface{})
+	Put(any)
 }
 
 // writePoolData is the type added to the write buffer pool. This wrapper is
@@ -991,7 +991,7 @@ func (c *Conn) handleProtocolError(message string) error {
 	if len(data) > maxControlFramePayloadSize {
 		data = data[:maxControlFramePayloadSize]
 	}
-	// Make a best effor to send a close message describing the problem.
+	// Make a best effort to send a close message describing the problem.
 	_ = c.WriteControl(CloseMessage, data, time.Now().Add(writeWait))
 	return errors.New("websocket: " + message)
 }
@@ -1147,7 +1147,7 @@ func (c *Conn) SetCloseHandler(h func(code int, text string) error) {
 	if h == nil {
 		h = func(code int, text string) error {
 			message := FormatCloseMessage(code, "")
-			// Make a best effor to send the close message.
+			// Make a best effort to send the close message.
 			_ = c.WriteControl(CloseMessage, message, time.Now().Add(writeWait))
 			return nil
 		}
@@ -1206,6 +1206,7 @@ func (c *Conn) NetConn() net.Conn {
 
 // UnderlyingConn returns the internal net.Conn. This can be used to further
 // modifications to connection specific flags.
+//
 // Deprecated: Use the NetConn method.
 func (c *Conn) UnderlyingConn() net.Conn {
 	return c.conn

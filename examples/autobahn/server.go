@@ -14,7 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/gorilla/websocket"
+	"github.com/scalecode-solutions/websocket"
 )
 
 var upgrader = websocket.Upgrader{
