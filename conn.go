@@ -1019,9 +1019,20 @@ func (c *Conn) NextReader() (messageType int, r io.Reader, err error) {
 	for c.readErr == nil {
 		frameType, err := c.advanceFrame()
 		if err != nil {
+			// Timeouts are recoverable: the application can extend the read
+			// deadline and try again. Don't record a permanent readErr in that
+			// case, and don't count the attempt toward the spin-loop panic
+			// threshold.
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				return noFrame, nil, err
+			}
 			c.readErr = err
 			break
 		}
+		// Reset the spin-loop counter after any successful frame read
+		// (including control frames that don't produce a data reader).
+		c.readErrCount = 0
 
 		if frameType == TextMessage || frameType == BinaryMessage {
 			c.messageReader = &messageReader{c}
