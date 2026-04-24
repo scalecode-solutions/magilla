@@ -1,4 +1,4 @@
-# Magilla
+# magilla
 
 A Go WebSocket library. Fork of [gorilla/websocket](https://github.com/gorilla/websocket), modernized and extended.
 
@@ -12,13 +12,13 @@ A Go WebSocket library. Fork of [gorilla/websocket](https://github.com/gorilla/w
 ## Install
 
 ```
-go get github.com/scalecode-solutions/Magilla
+go get github.com/scalecode-solutions/magilla
 ```
 
 ## Usage
 
 ```go
-import "github.com/scalecode-solutions/Magilla"
+import "github.com/scalecode-solutions/magilla"
 
 func handler(w http.ResponseWriter, r *http.Request) {
     var u magilla.Upgrader

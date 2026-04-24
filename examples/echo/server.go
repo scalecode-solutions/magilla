@@ -12,7 +12,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/scalecode-solutions/Magilla"
+	"github.com/scalecode-solutions/magilla"
 )
 
 var addr = flag.String("addr", "localhost:8080", "http service address")

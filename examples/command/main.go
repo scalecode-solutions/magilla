@@ -14,7 +14,7 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/scalecode-solutions/Magilla"
+	"github.com/scalecode-solutions/magilla"
 )
 
 var (

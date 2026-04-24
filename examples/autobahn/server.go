@@ -14,7 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/scalecode-solutions/Magilla"
+	"github.com/scalecode-solutions/magilla"
 )
 
 var upgrader = magilla.Upgrader{

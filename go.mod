@@ -1,4 +1,4 @@
-module github.com/scalecode-solutions/Magilla
+module github.com/scalecode-solutions/magilla
 
 go 1.26
 
