@@ -362,6 +362,59 @@ func (c *Conn) Close() error {
 	return c.conn.Close()
 }
 
+// CloseGracefully initiates the RFC 6455 section 5.5.1 close handshake from
+// this side of the connection. It sends a Close control frame with the
+// given code and reason, drains incoming messages until the peer echoes
+// its own Close (or the deadline passes), and then tears down the
+// underlying network connection.
+//
+// A zero deadline waits indefinitely for the peer to echo the Close.
+//
+// The caller MUST have stopped any other goroutine that is reading from
+// the connection (ReadMessage, NextReader, ReadJSON) before calling
+// CloseGracefully — the drain loop uses the same reader and is not safe
+// for concurrent use. The peer-initiated side of the handshake does not
+// need this helper: when ReadMessage surfaces a *CloseError from the peer,
+// the default close handler has already written the reply close, and the
+// application only needs to call Close.
+//
+// CloseGracefully returns the first error encountered; the underlying
+// Close is always attempted regardless.
+func (c *Conn) CloseGracefully(closeCode int, reason string, deadline time.Time) error {
+	var firstErr error
+	setErr := func(e error) {
+		if firstErr == nil {
+			firstErr = e
+		}
+	}
+
+	// 1. Send our Close frame. ErrCloseSent after this point for any
+	//    other writes on the connection.
+	msg := FormatCloseMessage(closeCode, reason)
+	if err := c.WriteControl(CloseMessage, msg, deadline); err != nil && err != ErrCloseSent {
+		setErr(err)
+	}
+
+	// 2. Drain reads until the peer sends its own Close (surfaced as a
+	//    *CloseError from NextReader), the connection dies, or the
+	//    deadline fires. We intentionally don't check the returned
+	//    err type — any non-nil exit from NextReader ends the loop.
+	if !deadline.IsZero() {
+		_ = c.SetReadDeadline(deadline)
+	}
+	for {
+		if _, _, err := c.NextReader(); err != nil {
+			break
+		}
+	}
+
+	// 3. Tear down the net.Conn.
+	if err := c.Close(); err != nil {
+		setErr(err)
+	}
+	return firstErr
+}
+
 // LocalAddr returns the local network address.
 func (c *Conn) LocalAddr() net.Addr {
 	return c.conn.LocalAddr()

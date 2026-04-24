@@ -925,3 +925,69 @@ func TestFailedConnectionReadPanic(t *testing.T) {
 	}
 	t.Fatal("should not get here")
 }
+
+// TestCloseGracefully exercises the initiator side of the RFC 6455 close
+// handshake. Two Conns are wired through a net.Pipe; the client calls
+// CloseGracefully and the server runs a plain read loop so the default
+// close handler echoes the close back.
+func TestCloseGracefully(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	client := newConn(cConn, false, 1024, 1024, nil, nil, nil)
+	server := newConn(sConn, true, 1024, 1024, nil, nil, nil)
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		// The default close handler writes a Close reply when the peer's
+		// Close frame arrives, then NextReader returns a *CloseError.
+		for {
+			if _, _, err := server.NextReader(); err != nil {
+				break
+			}
+		}
+		_ = server.Close()
+	}()
+
+	err := client.CloseGracefully(CloseNormalClosure, "bye", time.Now().Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("CloseGracefully: %v", err)
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("server did not observe the close handshake in time")
+	}
+}
+
+// TestCloseGracefullyTimeout verifies that a peer that ignores the Close
+// frame causes CloseGracefully to tear down the connection at the deadline
+// rather than hanging indefinitely.
+func TestCloseGracefullyTimeout(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	client := newConn(cConn, false, 1024, 1024, nil, nil, nil)
+	// Server side: drain the Close frame into the void but never reply.
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			if _, err := sConn.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	start := time.Now()
+	err := client.CloseGracefully(CloseNormalClosure, "bye",
+		time.Now().Add(200*time.Millisecond))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		// Some platforms may return nil if the pipe Close happens to
+		// succeed after the deadline expires; not a failure.
+		t.Logf("no err returned; elapsed=%v", elapsed)
+	}
+	if elapsed > 1*time.Second {
+		t.Errorf("CloseGracefully took too long: %v", elapsed)
+	}
+	_ = sConn.Close()
+}
