@@ -224,4 +224,53 @@
 // more details refer to RFC 7692.
 //
 // Use of compression is experimental and may result in decreased performance.
+//
+// HTTP/2 support (RFC 8441)
+//
+// This package can bootstrap a WebSocket connection over HTTP/2 using the
+// Extended CONNECT method defined in RFC 8441. The WebSocket wire protocol
+// above the transport (framing, masking, close handshake, permessage-deflate)
+// is identical to the HTTP/1.1 case.
+//
+// Client
+//
+// Set Dialer.HTTP2 to HTTP2Auto (prefer h2, fall back to h1 if the peer
+// doesn't support Extended CONNECT) or HTTP2Required (fail if h2 isn't
+// available). The default HTTP2Disabled preserves the classic HTTP/1.1
+// Upgrade behavior.
+//
+//  d := &websocket.Dialer{HTTP2: websocket.HTTP2Auto}
+//  conn, resp, err := d.Dial("wss://example.com/ws", nil)
+//
+// HTTP/2 mode requires an https:// URL and does not currently work with
+// the Dialer.Proxy field.
+//
+// Server
+//
+// The existing Upgrader.Upgrade handler transparently accepts both classic
+// HTTP/1.1 Upgrade requests and HTTP/2 Extended CONNECT requests. No
+// code change is needed beyond running behind an HTTP/2-capable server.
+//
+// IMPORTANT: In Go 1.26, advertising SETTINGS_ENABLE_CONNECT_PROTOCOL=1
+// to peers is gated behind a GODEBUG flag (see Go issue #71128). Until a
+// future Go release flips the default, servers that want to accept
+// HTTP/2 WebSocket clients must be started with:
+//
+//  GODEBUG=http2xconnect=1
+//
+// Without that flag the Go HTTP/2 server will refuse Extended CONNECT
+// requests and the h1 Upgrade path will be used instead.
+//
+// The HTTP/2 handshake uses status code 200 (not 101) and omits the
+// Upgrade, Connection, Sec-WebSocket-Key, and Sec-WebSocket-Accept
+// headers — they are HTTP/1.1 artifacts. Subprotocol and compression
+// negotiation work as in the h1 case via Sec-WebSocket-Protocol and
+// Sec-WebSocket-Extensions.
+//
+// Because HTTP/2 streams do not support net.Conn's deadline API natively,
+// SetDeadline / SetReadDeadline / SetWriteDeadline on an h2-backed *Conn
+// cancel the whole stream on expiry rather than returning os.ErrDeadlineExceeded
+// from a single Read/Write. Callers that arm a deadline around an I/O and
+// abandon the connection on expiry (the typical WebSocket pattern) will
+// see this as a normal deadline-exceeded error on their next operation.
 package websocket

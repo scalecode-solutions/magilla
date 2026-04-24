@@ -125,6 +125,18 @@ type Dialer struct {
 	// If Jar is nil, cookies are not sent in requests and ignored
 	// in responses.
 	Jar http.CookieJar
+
+	// HTTP2 controls whether the dialer attempts an RFC 8441 Extended
+	// CONNECT handshake over HTTP/2. The default HTTP2Disabled preserves
+	// the classic HTTP/1.1 Upgrade behavior byte-for-byte. Set to
+	// HTTP2Auto to prefer h2 with a transparent fallback to h1 when the
+	// peer does not advertise SETTINGS_ENABLE_CONNECT_PROTOCOL, or
+	// HTTP2Required to fail if h2 is unavailable.
+	//
+	// HTTP/2 mode requires an https:// URL and does not support the
+	// Proxy field. The server process must be started with
+	// GODEBUG=http2xconnect=1 in Go 1.26 to advertise support.
+	HTTP2 HTTP2Mode
 }
 
 // Dial creates a new client connection by calling DialContext with a background context.
@@ -200,6 +212,28 @@ func (d *Dialer) DialContext(ctx context.Context, urlStr string, requestHeader h
 	if u.User != nil {
 		// User name and password are not allowed in websocket URIs.
 		return nil, nil, errMalformedURL
+	}
+
+	// HTTP/2 branch. The h2 dial handles its own handshake entirely and
+	// returns a *Conn on top of an h2 stream. On HTTP2Auto we transparently
+	// fall back to the classic h1 Upgrade handshake when the peer signals
+	// it doesn't support Extended CONNECT; HTTP2Required propagates the
+	// error instead.
+	if d.HTTP2 != HTTP2Disabled {
+		c, resp, err := d.dialHTTP2(ctx, u, requestHeader)
+		if err == nil {
+			return c, resp, nil
+		}
+		if d.HTTP2 == HTTP2Required {
+			return c, resp, err
+		}
+		if !isH2NotAvailable(err) && !errors.Is(err, errHTTP2RequiresHTTPS) {
+			// Any other error (network, bad-handshake with a definite
+			// response, context cancel, etc.) is reported as-is.
+			// Falling back to h1 would mask a real problem.
+			return c, resp, err
+		}
+		// else: fall through to h1 path for HTTP2Auto.
 	}
 
 	req := &http.Request{

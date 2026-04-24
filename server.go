@@ -122,6 +122,14 @@ func (u *Upgrader) selectSubprotocol(r *http.Request, responseHeader http.Header
 // If the upgrade fails, then Upgrade replies to the client with an HTTP error
 // response.
 func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeader http.Header) (*Conn, error) {
+	// RFC 8441 WebSockets-over-HTTP/2: detect a CONNECT request carrying
+	// the :protocol=websocket pseudo-header (exposed as a regular Header
+	// key by the net/http h2 server, see x/net/http2 server.go:2343) and
+	// dispatch to the h2 handshake path. The h1 logic below is unchanged.
+	if r.ProtoMajor == 2 && r.Method == http.MethodConnect && r.Header.Get(":protocol") == "websocket" {
+		return u.upgradeHTTP2(w, r, responseHeader)
+	}
+
 	const badHandshake = "websocket: the client is not using the websocket protocol: "
 
 	if !tokenListContainsValue(r.Header, "Connection", "upgrade") {
