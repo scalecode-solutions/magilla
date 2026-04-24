@@ -51,7 +51,20 @@ type Upgrader struct {
 	// requested by the client. If there's no match, then no protocol is
 	// negotiated (the Sec-Websocket-Protocol header is not included in the
 	// handshake response).
+	//
+	// When NegotiateSubprotocol is set, this field is ignored.
 	Subprotocols []string
+
+	// NegotiateSubprotocol, when non-nil, overrides the Subprotocols-based
+	// negotiation. It is called with the incoming request and the list of
+	// subprotocols the client offered (parsed from Sec-WebSocket-Protocol).
+	// It returns the subprotocol the server picks, or an empty string to
+	// decline negotiation.
+	//
+	// This hook lets the server pick based on request context — for
+	// example the authenticated user, a routing prefix, or a feature
+	// flag — rather than a static preference list.
+	NegotiateSubprotocol func(r *http.Request, offered []string) string
 
 	// Error specifies the function for generating HTTP error responses. If Error
 	// is nil, then http.Error is used to generate the HTTP response.
@@ -98,6 +111,9 @@ func checkSameOrigin(r *http.Request) bool {
 }
 
 func (u *Upgrader) selectSubprotocol(r *http.Request, responseHeader http.Header) string {
+	if u.NegotiateSubprotocol != nil {
+		return u.NegotiateSubprotocol(r, Subprotocols(r))
+	}
 	if u.Subprotocols != nil {
 		clientProtocols := Subprotocols(r)
 		for _, clientProtocol := range clientProtocols {

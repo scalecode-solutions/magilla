@@ -86,6 +86,43 @@ func TestSubProtocolSelection(t *testing.T) {
 	}
 }
 
+func TestNegotiateSubprotocolCallback(t *testing.T) {
+	// Callback overrides Subprotocols entirely.
+	var gotOffered []string
+	upgrader := Upgrader{
+		Subprotocols: []string{"from-static-list"}, // must be ignored
+		NegotiateSubprotocol: func(r *http.Request, offered []string) string {
+			gotOffered = append([]string(nil), offered...)
+			// Pick whichever the caller wants regardless of what the
+			// static list says.
+			for _, p := range offered {
+				if p == "v2-authed" {
+					return p
+				}
+			}
+			return ""
+		},
+	}
+
+	r := http.Request{Header: http.Header{"Sec-Websocket-Protocol": {"v1, v2-authed"}}}
+	s := upgrader.selectSubprotocol(&r, nil)
+	if s != "v2-authed" {
+		t.Errorf("selectSubprotocol = %q, want %q", s, "v2-authed")
+	}
+	if len(gotOffered) != 2 || gotOffered[0] != "v1" || gotOffered[1] != "v2-authed" {
+		t.Errorf("callback got offered %v, want [v1 v2-authed]", gotOffered)
+	}
+
+	// Callback can decline by returning "".
+	upgrader.NegotiateSubprotocol = func(r *http.Request, offered []string) string {
+		return ""
+	}
+	r = http.Request{Header: http.Header{"Sec-Websocket-Protocol": {"anything"}}}
+	if got := upgrader.selectSubprotocol(&r, nil); got != "" {
+		t.Errorf("declined callback returned %q, want empty", got)
+	}
+}
+
 var checkSameOriginTests = []struct {
 	ok bool
 	r  *http.Request
