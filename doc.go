@@ -9,7 +9,7 @@
 // The Conn type represents a WebSocket connection. A server application calls
 // the Upgrader.Upgrade method from an HTTP request handler to get a *Conn:
 //
-//  var upgrader = websocket.Upgrader{
+//  var upgrader = magilla.Upgrader{
 //      ReadBufferSize:  1024,
 //      WriteBufferSize: 1024,
 //  }
@@ -40,7 +40,7 @@
 //  }
 //
 // In above snippet of code, p is a []byte and messageType is an int with value
-// websocket.BinaryMessage or websocket.TextMessage.
+// magilla.BinaryMessage or magilla.TextMessage.
 //
 // An application can also send and receive messages using the io.WriteCloser
 // and io.Reader interfaces. To send a message, call the connection NextWriter
@@ -110,7 +110,7 @@
 // in messages from the peer, then the application should start a goroutine to
 // read and discard messages from the peer. A simple example is:
 //
-//  func readLoop(c *websocket.Conn) {
+//  func readLoop(c *magilla.Conn) {
 //      for {
 //          if _, _, err := c.NextReader(); err != nil {
 //              c.Close()
@@ -205,7 +205,7 @@
 // to true in Dialer or Upgrader will attempt to negotiate per message deflate
 // support.
 //
-//  var upgrader = websocket.Upgrader{
+//  var upgrader = magilla.Upgrader{
 //      EnableCompression: true,
 //  }
 //
@@ -239,7 +239,7 @@
 // available). The default HTTP2Disabled preserves the classic HTTP/1.1
 // Upgrade behavior.
 //
-//  d := &websocket.Dialer{HTTP2: websocket.HTTP2Auto}
+//  d := &magilla.Dialer{HTTP2: magilla.HTTP2Auto}
 //  conn, resp, err := d.Dial("wss://example.com/ws", nil)
 //
 // HTTP/2 mode requires an https:// URL and does not currently work with
@@ -273,4 +273,4 @@
 // from a single Read/Write. Callers that arm a deadline around an I/O and
 // abandon the connection on expiry (the typical WebSocket pattern) will
 // see this as a normal deadline-exceeded error on their next operation.
-package websocket
+package magilla

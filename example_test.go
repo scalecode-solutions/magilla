@@ -2,34 +2,34 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package websocket_test
+package magilla_test
 
 import (
 	"log"
 	"net/http"
 	"testing"
 
-	"github.com/scalecode-solutions/websocket"
+	"github.com/scalecode-solutions/Magilla"
 )
 
 var (
-	c   *websocket.Conn
+	c   *magilla.Conn
 	req *http.Request
 )
 
-// The websocket.IsUnexpectedCloseError function is useful for identifying
+// The magilla.IsUnexpectedCloseError function is useful for identifying
 // application and protocol errors.
 //
 // This server application works with a client application running in the
 // browser. The client application does not explicitly close the websocket. The
 // only expected close message from the client has the code
-// websocket.CloseGoingAway. All other close messages are likely the
+// magilla.CloseGoingAway. All other close messages are likely the
 // result of an application or protocol error and are logged to aid debugging.
 func ExampleIsUnexpectedCloseError() {
 	for {
 		messageType, p, err := c.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
+			if magilla.IsUnexpectedCloseError(err, magilla.CloseGoingAway) {
 				log.Printf("error: %v, user-agent: %v", err, req.Header.Get("User-Agent"))
 			}
 			return

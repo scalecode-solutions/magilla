@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/scalecode-solutions/websocket"
+	"github.com/scalecode-solutions/Magilla"
 )
 
 const (
@@ -32,7 +32,7 @@ var (
 	space   = []byte{' '}
 )
 
-var upgrader = websocket.Upgrader{
+var upgrader = magilla.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 }
@@ -42,7 +42,7 @@ type Client struct {
 	hub *Hub
 
 	// The websocket connection.
-	conn *websocket.Conn
+	conn *magilla.Conn
 
 	// Buffered channel of outbound messages.
 	send chan []byte
@@ -64,7 +64,7 @@ func (c *Client) readPump() {
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+			if magilla.IsUnexpectedCloseError(err, magilla.CloseGoingAway, magilla.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
 			break
@@ -91,11 +91,11 @@ func (c *Client) writePump() {
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
 				// The hub closed the channel.
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				c.conn.WriteMessage(magilla.CloseMessage, []byte{})
 				return
 			}
 
-			w, err := c.conn.NextWriter(websocket.TextMessage)
+			w, err := c.conn.NextWriter(magilla.TextMessage)
 			if err != nil {
 				return
 			}
@@ -113,7 +113,7 @@ func (c *Client) writePump() {
 			}
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			if err := c.conn.WriteMessage(magilla.PingMessage, nil); err != nil {
 				return
 			}
 		}

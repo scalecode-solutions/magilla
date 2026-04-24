@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/scalecode-solutions/websocket"
+	"github.com/scalecode-solutions/Magilla"
 )
 
 const (
@@ -34,7 +34,7 @@ var (
 	addr      = flag.String("addr", ":8080", "http service address")
 	homeTempl = template.Must(template.New("").Parse(homeHTML))
 	filename  string
-	upgrader  = websocket.Upgrader{
+	upgrader  = magilla.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 	}
@@ -55,7 +55,7 @@ func readFileIfModified(lastMod time.Time) ([]byte, time.Time, error) {
 	return p, fi.ModTime(), nil
 }
 
-func reader(ws *websocket.Conn) {
+func reader(ws *magilla.Conn) {
 	defer ws.Close()
 	ws.SetReadLimit(512)
 	ws.SetReadDeadline(time.Now().Add(pongWait))
@@ -68,7 +68,7 @@ func reader(ws *websocket.Conn) {
 	}
 }
 
-func writer(ws *websocket.Conn, lastMod time.Time) {
+func writer(ws *magilla.Conn, lastMod time.Time) {
 	lastError := ""
 	pingTicker := time.NewTicker(pingPeriod)
 	fileTicker := time.NewTicker(filePeriod)
@@ -96,13 +96,13 @@ func writer(ws *websocket.Conn, lastMod time.Time) {
 
 			if p != nil {
 				ws.SetWriteDeadline(time.Now().Add(writeWait))
-				if err := ws.WriteMessage(websocket.TextMessage, p); err != nil {
+				if err := ws.WriteMessage(magilla.TextMessage, p); err != nil {
 					return
 				}
 			}
 		case <-pingTicker.C:
 			ws.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := ws.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+			if err := ws.WriteMessage(magilla.PingMessage, []byte{}); err != nil {
 				return
 			}
 		}
@@ -112,7 +112,7 @@ func writer(ws *websocket.Conn, lastMod time.Time) {
 func serveWs(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		if _, ok := err.(websocket.HandshakeError); !ok {
+		if _, ok := err.(magilla.HandshakeError); !ok {
 			log.Println(err)
 		}
 		return

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package websocket
+package magilla
 
 import (
 	"bufio"
@@ -295,7 +295,7 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 
 // Upgrade upgrades the HTTP server connection to the WebSocket protocol.
 //
-// Deprecated: Use websocket.Upgrader instead.
+// Deprecated: Use magilla.Upgrader instead.
 //
 // Upgrade does not perform origin checking. The application is responsible for
 // checking the Origin header before calling Upgrade. An example implementation

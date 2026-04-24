@@ -14,10 +14,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/scalecode-solutions/websocket"
+	"github.com/scalecode-solutions/Magilla"
 )
 
-var upgrader = websocket.Upgrader{
+var upgrader = magilla.Upgrader{
 	ReadBufferSize:    4096,
 	WriteBufferSize:   4096,
 	EnableCompression: true,
@@ -42,7 +42,7 @@ func echoCopy(w http.ResponseWriter, r *http.Request, writerOnly bool) {
 			}
 			return
 		}
-		if mt == websocket.TextMessage {
+		if mt == magilla.TextMessage {
 			r = &validator{r: r}
 		}
 		w, err := conn.NextWriter(mt)
@@ -50,7 +50,7 @@ func echoCopy(w http.ResponseWriter, r *http.Request, writerOnly bool) {
 			log.Println("NextWriter:", err)
 			return
 		}
-		if mt == websocket.TextMessage {
+		if mt == magilla.TextMessage {
 			r = &validator{r: r}
 		}
 		if writerOnly {
@@ -60,8 +60,8 @@ func echoCopy(w http.ResponseWriter, r *http.Request, writerOnly bool) {
 		}
 		if err != nil {
 			if err == errInvalidUTF8 {
-				conn.WriteControl(websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.CloseInvalidFramePayloadData, ""),
+				conn.WriteControl(magilla.CloseMessage,
+					magilla.FormatCloseMessage(magilla.CloseInvalidFramePayloadData, ""),
 					time.Time{})
 			}
 			log.Println("Copy:", err)
@@ -100,10 +100,10 @@ func echoReadAll(w http.ResponseWriter, r *http.Request, writeMessage, writePrep
 			}
 			return
 		}
-		if mt == websocket.TextMessage {
+		if mt == magilla.TextMessage {
 			if !utf8.Valid(b) {
-				conn.WriteControl(websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.CloseInvalidFramePayloadData, ""),
+				conn.WriteControl(magilla.CloseMessage,
+					magilla.FormatCloseMessage(magilla.CloseInvalidFramePayloadData, ""),
 					time.Time{})
 				log.Println("ReadAll: invalid utf8")
 			}
@@ -115,7 +115,7 @@ func echoReadAll(w http.ResponseWriter, r *http.Request, writeMessage, writePrep
 					log.Println("WriteMessage:", err)
 				}
 			} else {
-				pm, err := websocket.NewPreparedMessage(mt, b)
+				pm, err := magilla.NewPreparedMessage(mt, b)
 				if err != nil {
 					log.Println("NewPreparedMessage:", err)
 					return

@@ -1,4 +1,4 @@
-module github.com/scalecode-solutions/websocket
+module github.com/scalecode-solutions/Magilla
 
 go 1.26
 
