@@ -926,6 +926,127 @@ func TestFailedConnectionReadPanic(t *testing.T) {
 	t.Fatal("should not get here")
 }
 
+// TestSetWriteFrameSize verifies that an outbound message larger than the
+// configured per-frame cap is split into multiple frames on the wire and
+// still round-trips correctly on the receiver side.
+func TestSetWriteFrameSize(t *testing.T) {
+	tests := []struct {
+		name       string
+		isServer   bool
+		method     string // "write" | "readfrom" | "message"
+		frameCap   int
+		payloadLen int
+		wantFrames int // minimum frames expected on wire
+	}{
+		{"server Write fragments", true, "write", 100, 550, 6},
+		{"server ReadFrom fragments", true, "readfrom", 100, 550, 6},
+		{"server WriteMessage fragments", true, "message", 100, 550, 6},
+		{"client Write fragments", false, "write", 100, 550, 6},
+		// No cap: a small message is a single frame.
+		{"no cap single frame", true, "write", 0, 200, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var connBuf bytes.Buffer
+			wc := newTestConn(nil, &connBuf, tt.isServer)
+			wc.SetWriteFrameSize(tt.frameCap)
+
+			payload := make([]byte, tt.payloadLen)
+			for i := range payload {
+				payload[i] = byte(i)
+			}
+
+			switch tt.method {
+			case "write":
+				w, err := wc.NextWriter(BinaryMessage)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := w.Write(payload); err != nil {
+					t.Fatal(err)
+				}
+				if err := w.Close(); err != nil {
+					t.Fatal(err)
+				}
+			case "readfrom":
+				w, err := wc.NextWriter(BinaryMessage)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := io.Copy(w, bytes.NewReader(payload)); err != nil {
+					t.Fatal(err)
+				}
+				if err := w.Close(); err != nil {
+					t.Fatal(err)
+				}
+			case "message":
+				if err := wc.WriteMessage(BinaryMessage, payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// Count frames on the wire by parsing frame headers. We
+			// don't need to fully parse; just walk the length prefix.
+			data := connBuf.Bytes()
+			frames := 0
+			for len(data) > 0 {
+				if len(data) < 2 {
+					t.Fatalf("truncated frame header: %d bytes left", len(data))
+				}
+				b1 := data[1]
+				masked := b1&0x80 != 0
+				payloadLen := int64(b1 & 0x7f)
+				hdr := 2
+				switch payloadLen {
+				case 126:
+					payloadLen = int64(data[2])<<8 | int64(data[3])
+					hdr = 4
+				case 127:
+					pl := uint64(0)
+					for i := 0; i < 8; i++ {
+						pl = pl<<8 | uint64(data[2+i])
+					}
+					payloadLen = int64(pl)
+					hdr = 10
+				}
+				if masked {
+					hdr += 4
+				}
+				total := int64(hdr) + payloadLen
+				if int64(len(data)) < total {
+					t.Fatalf("truncated frame: need %d, have %d", total, len(data))
+				}
+				data = data[total:]
+				frames++
+			}
+			if frames < tt.wantFrames {
+				t.Errorf("wrote %d frames, want at least %d", frames, tt.wantFrames)
+			}
+
+			// Round-trip through the receiver to confirm reassembly.
+			rc := newTestConn(&connBuf, nil, !tt.isServer)
+			// Rewind connBuf via new buffer since Bytes() is consumed
+			// above; rebuild.
+			{
+				var buf bytes.Buffer
+				wc := newTestConn(nil, &buf, tt.isServer)
+				wc.SetWriteFrameSize(tt.frameCap)
+				if err := wc.WriteMessage(BinaryMessage, payload); err != nil {
+					t.Fatal(err)
+				}
+				rc = newTestConn(&buf, nil, !tt.isServer)
+			}
+			_, got, err := rc.ReadMessage()
+			if err != nil {
+				t.Fatalf("ReadMessage: %v", err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Errorf("payload mismatch: got %d bytes, want %d", len(got), len(payload))
+			}
+		})
+	}
+}
+
 // TestCloseGracefully exercises the initiator side of the RFC 6455 close
 // handshake. Two Conns are wired through a net.Pipe; the client calls
 // CloseGracefully and the server runs a plain read loop so the default

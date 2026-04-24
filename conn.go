@@ -256,13 +256,14 @@ type Conn struct {
 	// mu is the inner mutex. It is held only around c.conn.Write so that
 	// WriteControl can interleave control frames between data frames of an
 	// active streaming writer (RFC 6455 §5.5).
-	writeMu       chan struct{} // outer mutex: serialize public write ops
-	mu            chan struct{} // inner mutex: around c.conn.Write
-	writeBuf      []byte        // frame is constructed in this buffer.
-	writePool     BufferPool
-	writeBufSize  int
-	writeDeadline atomic.Value // time.Time; read/written concurrently
-	writer        io.WriteCloser // the current writer returned to the application
+	writeMu        chan struct{}  // outer mutex: serialize public write ops
+	mu             chan struct{}  // inner mutex: around c.conn.Write
+	writeBuf       []byte         // frame is constructed in this buffer.
+	writePool      BufferPool
+	writeBufSize   int
+	writeFrameSize int            // cap per-frame payload; 0 = no cap beyond writeBuf
+	writeDeadline  atomic.Value   // time.Time; read/written concurrently
+	writer         io.WriteCloser // the current writer returned to the application
 
 	writeErrMu sync.Mutex
 	writeErr   error
@@ -768,13 +769,30 @@ func (w *messageWriter) flushFrame(final bool, extra []byte) error {
 	return nil
 }
 
+// payloadRoom returns the number of payload bytes that can still be
+// appended to the current frame before a flush is required, factoring in
+// both the write buffer capacity and the optional writeFrameSize cap.
+func (w *messageWriter) payloadRoom() int {
+	room := len(w.c.writeBuf) - w.pos
+	if w.c.writeFrameSize > 0 {
+		used := w.pos - maxFrameHeaderSize
+		if cap := w.c.writeFrameSize - used; cap < room {
+			room = cap
+		}
+	}
+	if room < 0 {
+		room = 0
+	}
+	return room
+}
+
 func (w *messageWriter) ncopy(max int) (int, error) {
-	n := len(w.c.writeBuf) - w.pos
+	n := w.payloadRoom()
 	if n <= 0 {
 		if err := w.flushFrame(false, nil); err != nil {
 			return 0, err
 		}
-		n = len(w.c.writeBuf) - w.pos
+		n = w.payloadRoom()
 	}
 	if n > max {
 		n = max
@@ -787,7 +805,12 @@ func (w *messageWriter) Write(p []byte) (int, error) {
 		return 0, w.err
 	}
 
-	if len(p) > 2*len(w.c.writeBuf) && w.c.isServer {
+	// Fast path: send a large, unbuffered server-side payload as a single
+	// frame. Skipped when a frame-size cap is in effect or when the
+	// payload exceeds the cap, so the fragmenting path below is used
+	// instead.
+	if len(p) > 2*len(w.c.writeBuf) && w.c.isServer &&
+		(w.c.writeFrameSize == 0 || len(p) <= w.c.writeFrameSize) {
 		// Don't buffer large messages.
 		err := w.flushFrame(false, p)
 		if err != nil {
@@ -832,14 +855,17 @@ func (w *messageWriter) ReadFrom(r io.Reader) (nn int64, err error) {
 		return 0, w.err
 	}
 	for {
-		if w.pos == len(w.c.writeBuf) {
+		if w.payloadRoom() == 0 {
 			err = w.flushFrame(false, nil)
 			if err != nil {
 				break
 			}
 		}
+		// Clamp the read to the remaining room in this frame so we stay
+		// within writeFrameSize when set.
+		end := w.pos + w.payloadRoom()
 		var n int
-		n, err = r.Read(w.c.writeBuf[w.pos:])
+		n, err = r.Read(w.c.writeBuf[w.pos:end])
 		w.pos += n
 		nn += int64(n)
 		if err != nil {
@@ -887,7 +913,12 @@ func (c *Conn) WritePreparedMessage(pm *PreparedMessage) error {
 // internally and respect the write deadline during lock acquire (#704).
 func (c *Conn) WriteMessage(messageType int, data []byte) error {
 
-	if c.isServer && (c.newCompressionWriter == nil || !c.enableWriteCompression) {
+	// The fast path writes the message as a single unfragmented frame.
+	// Skip it when compression is active or when a frame-size cap is in
+	// effect and this payload would exceed it; in both cases the slow
+	// path handles fragmentation correctly.
+	if c.isServer && (c.newCompressionWriter == nil || !c.enableWriteCompression) &&
+		(c.writeFrameSize == 0 || len(data) <= c.writeFrameSize) {
 		// Fast path with no allocations and single frame. Acquire writeMu
 		// explicitly; endMessage (called by flushFrame) releases it.
 		if err := c.acquireWriteMu(c.getWriteDeadline()); err != nil {
@@ -925,6 +956,24 @@ func (c *Conn) WriteMessage(messageType int, data []byte) error {
 func (c *Conn) SetWriteDeadline(t time.Time) error {
 	c.writeDeadline.Store(t)
 	return nil
+}
+
+// SetWriteFrameSize caps the payload size of each outgoing WebSocket frame.
+// When a message exceeds this size, it is fragmented into multiple frames
+// at the frame boundary (RFC 6455 §5.4 continuation frames).
+//
+// A value of 0 (the default) disables the cap; frames are bounded only by
+// the connection's write buffer size. Useful for peering through proxies
+// or CDNs that reject large frames, or to reduce head-of-line blocking
+// on very large messages.
+//
+// SetWriteFrameSize should be called before write traffic starts. It is
+// not safe to call concurrently with other write methods.
+func (c *Conn) SetWriteFrameSize(n int) {
+	if n < 0 {
+		n = 0
+	}
+	c.writeFrameSize = n
 }
 
 // Read methods
