@@ -87,6 +87,16 @@ type Dialer struct {
 	// If Proxy is nil or returns a nil *URL, no proxy is used.
 	Proxy func(*http.Request) (*url.URL, error)
 
+	// ProxyConnectHeader optionally provides extra HTTP headers to send
+	// to the proxy on the CONNECT request, for example a custom
+	// Proxy-Authorization scheme or an application-specific trace
+	// header. Headers set here are sent in addition to Proxy-Authorization
+	// derived from a userinfo-bearing proxy URL; the URL wins any key
+	// collision.
+	//
+	// Only used with HTTP/HTTPS proxies.
+	ProxyConnectHeader http.Header
+
 	// TLSClientConfig specifies the TLS configuration to use with tls.Client.
 	// If nil, the default configuration is used.
 	// If NetDialTLSContext is set, Dial assumes the TLS handshake
@@ -137,6 +147,17 @@ type Dialer struct {
 	// Proxy field. The server process must be started with
 	// GODEBUG=http2xconnect=1 in Go 1.26 to advertise support.
 	HTTP2 HTTP2Mode
+
+	// DisableClientMask, when true, disables RFC 6455 client-to-server
+	// frame masking on outgoing frames. Masking is CPU overhead that
+	// only exists to prevent cache-poisoning attacks against broken
+	// intermediaries; backend-to-backend peers with no HTTP intermediary
+	// can safely skip it for a modest throughput gain.
+	//
+	// WARNING: browsers and strictly conformant servers will reject
+	// unmasked client frames. Only enable this when you control both
+	// sides and the server explicitly tolerates unmasked client frames.
+	DisableClientMask bool
 }
 
 // Dial creates a new client connection by calling DialContext with a background context.
@@ -362,6 +383,7 @@ func (d *Dialer) DialContext(ctx context.Context, urlStr string, requestHeader h
 	}
 
 	conn := newConn(netConn, false, d.ReadBufferSize, d.WriteBufferSize, d.WriteBufferPool, nil, nil)
+	conn.disableMask = d.DisableClientMask
 
 	if err := req.Write(netConn); err != nil {
 		return nil, nil, err
@@ -387,6 +409,16 @@ func (d *Dialer) DialContext(ctx context.Context, urlStr string, requestHeader h
 			}
 		}
 		return nil, nil, err
+	}
+
+	// Surface the TLS connection state on the handshake response so
+	// callers can inspect the negotiated cipher, peer certificates, etc.
+	// net/http.Response.TLS is only populated automatically when the
+	// response is read by a stdlib Transport; our manual handshake path
+	// has to fill it in.
+	if tc, ok := netConn.(*tls.Conn); ok {
+		cs := tc.ConnectionState()
+		resp.TLS = &cs
 	}
 
 	if d.Jar != nil {
@@ -454,7 +486,7 @@ func (d *Dialer) netDialFn(ctx context.Context, proxyURL *url.URL, backendURL *u
 	}
 	// Proxy dialing is wrapped to implement CONNECT method and possibly proxy auth.
 	if proxyURL != nil {
-		return proxyFromURL(proxyURL, netDial)
+		return proxyFromURL(proxyURL, netDial, d.ProxyConnectHeader)
 	}
 	return netDial, nil
 }

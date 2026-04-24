@@ -242,6 +242,49 @@ func TestProxyAuthorizationDial(t *testing.T) {
 	sendRecv(t, ws)
 }
 
+func TestProxyConnectHeader(t *testing.T) {
+	s := newServer(t)
+	defer s.Close()
+
+	surl, _ := url.Parse(s.Server.URL)
+
+	cstDialer := cstDialer
+	cstDialer.Proxy = http.ProxyURL(surl)
+	cstDialer.ProxyConnectHeader = http.Header{
+		"X-Custom-Header":  {"magilla-value"},
+		"X-Request-Id":     {"abc-123"},
+	}
+
+	connect := false
+	origHandler := s.Server.Config.Handler
+	s.Server.Config.Handler = http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodConnect {
+				if got := r.Header.Get("X-Custom-Header"); got != "magilla-value" {
+					t.Errorf("CONNECT X-Custom-Header = %q, want %q", got, "magilla-value")
+				}
+				if got := r.Header.Get("X-Request-Id"); got != "abc-123" {
+					t.Errorf("CONNECT X-Request-Id = %q, want %q", got, "abc-123")
+				}
+				connect = true
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if !connect {
+				http.Error(w, "no CONNECT seen", http.StatusBadRequest)
+				return
+			}
+			origHandler.ServeHTTP(w, r)
+		})
+
+	ws, _, err := cstDialer.Dial(s.URL, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer ws.Close()
+	sendRecv(t, ws)
+}
+
 func TestDial(t *testing.T) {
 	s := newServer(t)
 	defer s.Close()
@@ -322,11 +365,22 @@ func TestDialTLS(t *testing.T) {
 
 	d := cstDialer
 	d.TLSClientConfig = &tls.Config{RootCAs: rootCAs(t, s.Server)}
-	ws, _, err := d.Dial(s.URL, nil)
+	ws, resp, err := d.Dial(s.URL, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer ws.Close()
+	// #967: TLS connection state should be exposed on the handshake response.
+	if resp.TLS == nil {
+		t.Error("resp.TLS is nil on a wss handshake response")
+	} else {
+		if resp.TLS.Version == 0 {
+			t.Error("resp.TLS.Version is zero; state does not look populated")
+		}
+		if len(resp.TLS.PeerCertificates) == 0 {
+			t.Error("resp.TLS.PeerCertificates is empty")
+		}
+	}
 	sendRecv(t, ws)
 }
 

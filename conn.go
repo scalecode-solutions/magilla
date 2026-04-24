@@ -244,6 +244,11 @@ type Conn struct {
 	isServer    bool
 	subprotocol string
 
+	// disableMask skips RFC 6455 client-to-server frame masking on write.
+	// Only meaningful on a client (!isServer); browsers and strict servers
+	// reject unmasked client frames. See Dialer.DisableClientMask.
+	disableMask bool
+
 	// Write fields
 	//
 	// writeMu is the outer write mutex. It is held for the entire lifetime
@@ -538,20 +543,21 @@ func (c *Conn) WriteControl(messageType int, data []byte, deadline time.Time) er
 
 	b0 := byte(messageType) | finalBit
 	b1 := byte(len(data))
-	if !c.isServer {
+	maskFrame := !c.isServer && !c.disableMask
+	if maskFrame {
 		b1 |= maskBit
 	}
 
 	buf := make([]byte, 0, maxFrameHeaderSize+maxControlFramePayloadSize)
 	buf = append(buf, b0, b1)
 
-	if c.isServer {
-		buf = append(buf, data...)
-	} else {
+	if maskFrame {
 		key := newMaskKey()
 		buf = append(buf, key[:]...)
 		buf = append(buf, data...)
 		maskBytes(key, 0, buf[6:])
+	} else {
+		buf = append(buf, data...)
 	}
 
 	if deadline.IsZero() {
@@ -711,15 +717,16 @@ func (w *messageWriter) flushFrame(final bool, extra []byte) error {
 	}
 	w.compress = false
 
+	maskFrame := !c.isServer && !c.disableMask
 	b1 := byte(0)
-	if !c.isServer {
+	if maskFrame {
 		b1 |= maskBit
 	}
 
 	// Assume that the frame starts at beginning of c.writeBuf.
 	framePos := 0
-	if c.isServer {
-		// Adjust up if mask not included in the header.
+	if !maskFrame {
+		// No mask key in the header; skip past the reserved 4 bytes.
 		framePos = 4
 	}
 
@@ -739,7 +746,7 @@ func (w *messageWriter) flushFrame(final bool, extra []byte) error {
 		c.writeBuf[framePos+1] = b1 | byte(length)
 	}
 
-	if !c.isServer {
+	if maskFrame {
 		key := newMaskKey()
 		copy(c.writeBuf[maxFrameHeaderSize-4:], key[:])
 		maskBytes(key, 0, c.writeBuf[maxFrameHeaderSize:w.pos])

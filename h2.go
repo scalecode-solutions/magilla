@@ -533,13 +533,15 @@ func (d *Dialer) dialHTTP2(
 	streamConn := newH2StreamConn(resp.Body, pw, nil, streamCancel, closer, local, remote)
 
 	c := newConn(streamConn, false, d.ReadBufferSize, d.WriteBufferSize, d.WriteBufferPool, nil, nil)
+	c.disableMask = d.DisableClientMask
 	c.subprotocol = resp.Header.Get("Sec-WebSocket-Protocol")
 	if compress {
 		c.newCompressionWriter = compressNoContextTakeover
 		c.newDecompressionReader = decompressNoContextTakeover
 	}
 	// Swap the response body so callers see an empty reader like the h1
-	// path does (the real body is owned by streamConn now).
+	// path does (the real body is owned by streamConn now). resp.TLS was
+	// already populated by http2.Transport.RoundTrip.
 	resp.Body = io.NopCloser(strings.NewReader(""))
 	return c, resp, nil
 }

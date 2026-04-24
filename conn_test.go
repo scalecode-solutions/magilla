@@ -926,6 +926,48 @@ func TestFailedConnectionReadPanic(t *testing.T) {
 	t.Fatal("should not get here")
 }
 
+// TestDisableClientMask verifies that a client with disableMask=true
+// writes frames without the MASK bit set and without a mask key. A
+// conformant client always masks; this test just confirms the opt-out
+// path works for peers that have explicitly agreed to skip masking.
+func TestDisableClientMask(t *testing.T) {
+	var connBuf bytes.Buffer
+	c := newTestConn(nil, &connBuf, false) // isServer=false -> client
+	c.disableMask = true
+
+	payload := []byte("hello-unmasked")
+	if err := c.WriteMessage(TextMessage, payload); err != nil {
+		t.Fatal(err)
+	}
+
+	data := connBuf.Bytes()
+	if len(data) < 2 {
+		t.Fatalf("frame too short: %d bytes", len(data))
+	}
+	b1 := data[1]
+	if b1&0x80 != 0 {
+		t.Errorf("MASK bit set on disableMask=true client frame: b1=0x%02x", b1)
+	}
+	payloadLen := int(b1 & 0x7f)
+	if payloadLen != len(payload) {
+		t.Fatalf("unexpected length encoding: got %d, want %d", payloadLen, len(payload))
+	}
+	// With no mask key, payload starts at byte 2.
+	if !bytes.Equal(data[2:2+len(payload)], payload) {
+		t.Errorf("payload not plaintext: got %q", data[2:2+len(payload)])
+	}
+
+	// Control path: verify WriteControl also respects the flag.
+	connBuf.Reset()
+	if err := c.WriteControl(PingMessage, []byte("p"), time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	data = connBuf.Bytes()
+	if data[1]&0x80 != 0 {
+		t.Errorf("MASK bit set on disableMask=true control frame: %#v", data)
+	}
+}
+
 // TestSetWriteFrameSize verifies that an outbound message larger than the
 // configured per-frame cap is split into multiple frames on the wire and
 // still round-trips correctly on the receiver side.

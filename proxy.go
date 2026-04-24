@@ -28,9 +28,13 @@ func (fn netDialerFunc) DialContext(ctx context.Context, network, addr string) (
 	return fn(ctx, network, addr)
 }
 
-func proxyFromURL(proxyURL *url.URL, forwardDial netDialerFunc) (netDialerFunc, error) {
+func proxyFromURL(proxyURL *url.URL, forwardDial netDialerFunc, extraConnectHeader http.Header) (netDialerFunc, error) {
 	if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
-		return (&httpProxyDialer{proxyURL: proxyURL, forwardDial: forwardDial}).DialContext, nil
+		return (&httpProxyDialer{
+			proxyURL:           proxyURL,
+			forwardDial:        forwardDial,
+			extraConnectHeader: extraConnectHeader,
+		}).DialContext, nil
 	}
 	dialer, err := proxy.FromURL(proxyURL, forwardDial)
 	if err != nil {
@@ -45,8 +49,9 @@ func proxyFromURL(proxyURL *url.URL, forwardDial netDialerFunc) (netDialerFunc, 
 }
 
 type httpProxyDialer struct {
-	proxyURL    *url.URL
-	forwardDial netDialerFunc
+	proxyURL           *url.URL
+	forwardDial        netDialerFunc
+	extraConnectHeader http.Header // optional caller-supplied headers
 }
 
 func (hpd *httpProxyDialer) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
@@ -57,6 +62,12 @@ func (hpd *httpProxyDialer) DialContext(ctx context.Context, network string, add
 	}
 
 	connectHeader := make(http.Header)
+	// Caller-supplied headers go in first so Proxy-Authorization derived
+	// from the proxy URL wins any conflict - the URL userinfo is a more
+	// explicit and specific signal.
+	for k, vs := range hpd.extraConnectHeader {
+		connectHeader[k] = append([]string(nil), vs...)
+	}
 	if user := hpd.proxyURL.User; user != nil {
 		// RFC 7617 permits an empty password. Send Basic auth whenever a
 		// username is present, even if no password was specified.
