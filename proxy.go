@@ -58,11 +58,12 @@ func (hpd *httpProxyDialer) DialContext(ctx context.Context, network string, add
 
 	connectHeader := make(http.Header)
 	if user := hpd.proxyURL.User; user != nil {
+		// RFC 7617 permits an empty password. Send Basic auth whenever a
+		// username is present, even if no password was specified.
 		proxyUser := user.Username()
-		if proxyPassword, passwordSet := user.Password(); passwordSet {
-			credential := base64.StdEncoding.EncodeToString([]byte(proxyUser + ":" + proxyPassword))
-			connectHeader.Set("Proxy-Authorization", "Basic "+credential)
-		}
+		proxyPassword, _ := user.Password()
+		credential := base64.StdEncoding.EncodeToString([]byte(proxyUser + ":" + proxyPassword))
+		connectHeader.Set("Proxy-Authorization", "Basic "+credential)
 	}
 	connectReq := &http.Request{
 		Method: http.MethodConnect,
