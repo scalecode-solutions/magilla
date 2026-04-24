@@ -1,31 +1,38 @@
-# Gorilla WebSocket
+# Magilla
 
-[![GoDoc](https://godoc.org/github.com/scalecode-solutions/Magilla?status.svg)](https://godoc.org/github.com/scalecode-solutions/Magilla)
+A Go WebSocket library. Fork of [gorilla/websocket](https://github.com/gorilla/websocket), modernized and extended.
 
-Gorilla WebSocket is a [Go](http://golang.org/) implementation of the
-[WebSocket](http://www.rfc-editor.org/rfc/rfc6455.txt) protocol.
+## What's different from gorilla/websocket
 
+- Go 1.26 baseline, `golang.org/x/net` up to date
+- **RFC 8441 WebSocket over HTTP/2** (Extended CONNECT) — client and server
+- Correctness fixes for hijacked write buffer reuse, idempotent compression `Close()`, recoverable read timeouts, empty proxy auth passwords, and CookieJar/Cookie header merging
+- `interface{}` → `any`, typos fixed, deprecations marked, appengine compat removed
 
-### Documentation
+## Install
 
-* [API Reference](https://pkg.go.dev/github.com/scalecode-solutions/Magilla?tab=doc)
-* [Chat example](https://github.com/scalecode-solutions/Magilla/tree/main/examples/chat)
-* [Command example](https://github.com/scalecode-solutions/Magilla/tree/main/examples/command)
-* [Client and server example](https://github.com/scalecode-solutions/Magilla/tree/main/examples/echo)
-* [File watch example](https://github.com/scalecode-solutions/Magilla/tree/main/examples/filewatch)
+```
+go get github.com/scalecode-solutions/Magilla
+```
 
-### Status
+## Usage
 
-The Gorilla WebSocket package provides a complete and tested implementation of
-the [WebSocket](http://www.rfc-editor.org/rfc/rfc6455.txt) protocol. The
-package API is stable.
+```go
+import "github.com/scalecode-solutions/Magilla"
 
-### Installation
+func handler(w http.ResponseWriter, r *http.Request) {
+    var u magilla.Upgrader
+    conn, err := u.Upgrade(w, r, nil)
+    if err != nil {
+        return
+    }
+    defer conn.Close()
+    // ... use conn
+}
+```
 
-    go get github.com/scalecode-solutions/Magilla
+For HTTP/2 (RFC 8441), set `Dialer.HTTP2 = magilla.HTTP2Auto` (client) and run your server with `GODEBUG=http2xconnect=1` until Go flips the default. See the package godoc for the full story.
 
-### Protocol Compliance
+## License
 
-The Gorilla WebSocket package passes the server tests in the [Autobahn Test
-Suite](https://github.com/crossbario/autobahn-testsuite) using the application in the [examples/autobahn
-subdirectory](https://github.com/scalecode-solutions/Magilla/tree/main/examples/autobahn).
+BSD 2-clause. Derivative of gorilla/websocket; original copyright preserved in `LICENSE` and file-level headers.

@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package websocket implements the WebSocket protocol defined in RFC 6455.
+// Package magilla implements the WebSocket protocol defined in RFC 6455 and
+// the WebSocket-over-HTTP/2 extension defined in RFC 8441. It is a fork of
+// gorilla/websocket, kept up to date with modern Go and with additional
+// features not present upstream.
 //
 // Overview
 //
