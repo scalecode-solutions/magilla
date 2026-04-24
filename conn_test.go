@@ -189,6 +189,146 @@ func TestConcurrencyWriteControl(t *testing.T) {
 	}
 }
 
+// TestConcurrencyWriteMessage exercises the concurrent-safe-writes contract:
+// N goroutines calling WriteMessage concurrently are serialized by the
+// outer writeMu, each message lands on the wire atomically (no frame
+// interleave), and all messages are delivered.
+func TestConcurrencyWriteMessage(t *testing.T) {
+	const workers = 32
+	const payload = "payload-payload-payload-payload-" // 32 bytes, non-fragmenting
+
+	var connBuf bytes.Buffer
+	wc := newTestConn(nil, &connBuf, true)
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := wc.WriteMessage(TextMessage, []byte(payload)); err != nil {
+				t.Errorf("concurrent WriteMessage: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Read them back off the wire. Server-side framing: opcode+len then
+	// payload, server-to-client has no mask. Each message is a single
+	// frame (payload < 126 bytes).
+	rc := newTestConn(&connBuf, nil, false)
+	seen := 0
+	for {
+		mt, data, err := rc.ReadMessage()
+		if err != nil {
+			break
+		}
+		if mt != TextMessage {
+			t.Fatalf("message %d: got type %d, want TextMessage", seen, mt)
+		}
+		if string(data) != payload {
+			t.Fatalf("message %d: payload corrupted (len %d, starts %q)", seen, len(data), string(data[:min(10, len(data))]))
+		}
+		seen++
+	}
+	if seen != workers {
+		t.Errorf("got %d messages, want %d", seen, workers)
+	}
+}
+
+// TestConcurrencyNextWriter verifies that multiple goroutines each using
+// NextWriter...Close are serialized and that the streaming writes of one
+// goroutine don't interleave frames with another's.
+func TestConcurrencyNextWriter(t *testing.T) {
+	const workers = 16
+	// Intentionally choose a payload size that fragments: larger than the
+	// default write buffer forces multiple flushFrame calls per message.
+	payload := bytes.Repeat([]byte("AB"), 8192)
+
+	var connBuf bytes.Buffer
+	wc := newTestConn(nil, &connBuf, true)
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w, err := wc.NextWriter(BinaryMessage)
+			if err != nil {
+				t.Errorf("NextWriter: %v", err)
+				return
+			}
+			// Two Writes so flushFrame fires at least once mid-stream.
+			if _, err := w.Write(payload[:len(payload)/2]); err != nil {
+				t.Errorf("write 1: %v", err)
+				_ = w.Close()
+				return
+			}
+			if _, err := w.Write(payload[len(payload)/2:]); err != nil {
+				t.Errorf("write 2: %v", err)
+				_ = w.Close()
+				return
+			}
+			if err := w.Close(); err != nil {
+				t.Errorf("close: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	rc := newTestConn(&connBuf, nil, false)
+	seen := 0
+	for {
+		mt, data, err := rc.ReadMessage()
+		if err != nil {
+			break
+		}
+		if mt != BinaryMessage {
+			t.Fatalf("message %d: got type %d, want BinaryMessage", seen, mt)
+		}
+		if !bytes.Equal(data, payload) {
+			t.Fatalf("message %d: payload corrupted (len %d, want %d)", seen, len(data), len(payload))
+		}
+		seen++
+	}
+	if seen != workers {
+		t.Errorf("got %d messages, want %d", seen, workers)
+	}
+}
+
+// TestWriteMessageDeadlineDuringAcquire verifies #704: a caller whose
+// writeDeadline fires while another goroutine holds the write mutex
+// returns errWriteTimeout promptly, rather than blocking past its deadline.
+func TestWriteMessageDeadlineDuringAcquire(t *testing.T) {
+	bw := newBlockingWriter()
+	c := newTestConn(nil, bw, false)
+
+	// Goroutine 1: grabs writeMu and stalls inside the underlying Write.
+	go func() {
+		_ = c.WriteMessage(TextMessage, []byte("first"))
+	}()
+	<-bw.c1 // first goroutine is now blocked in Write while holding writeMu
+
+	// Goroutine 2: write deadline 100ms. With writeMu held indefinitely,
+	// acquireWriteMu must return errWriteTimeout near the deadline.
+	if err := c.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	err := c.WriteMessage(TextMessage, []byte("second"))
+	elapsed := time.Since(start)
+
+	if err != errWriteTimeout {
+		t.Fatalf("got %v, want errWriteTimeout", err)
+	}
+	// Tolerate a 100ms slack for slow CI boxes.
+	if elapsed > 300*time.Millisecond {
+		t.Errorf("deadline took too long: %v", elapsed)
+	}
+
+	// Release the first goroutine so the test finishes cleanly.
+	close(bw.c2)
+}
+
 func TestControl(t *testing.T) {
 	const message = "this is a ping/pong message"
 	for _, isServer := range []bool{true, false} {
@@ -488,18 +628,25 @@ func TestWriteAfterMessageWriterClose(t *testing.T) {
 		t.Fatalf("no error writing after close")
 	}
 
+	// Concurrent-safe-writes contract change: NextWriter now holds the
+	// connection's write mutex until messageWriter.Close is called. The
+	// legacy "call NextWriter again to implicitly close the previous
+	// writer" shortcut has been retired - call Close explicitly. Writes
+	// to the first writer after Close still return an error.
 	w, _ = wc.NextWriter(BinaryMessage)
 	_, _ = io.WriteString(w, "hello")
+	if err := w.Close(); err != nil {
+		t.Fatalf("unexpected error closing message writer, %v", err)
+	}
 
-	// close w by getting next writer
-	_, err := wc.NextWriter(BinaryMessage)
+	w2, err := wc.NextWriter(BinaryMessage)
 	if err != nil {
 		t.Fatalf("unexpected error getting next writer, %v", err)
 	}
-
 	if _, err := io.WriteString(w, "world"); err == nil {
 		t.Fatalf("no error writing after close")
 	}
+	_ = w2.Close()
 }
 
 func TestReadLimit(t *testing.T) {
@@ -693,35 +840,69 @@ func TestUnexpectedCloseErrors(t *testing.T) {
 
 type blockingWriter struct {
 	c1, c2 chan struct{}
+	once   *sync.Once
 }
 
-func (w blockingWriter) Write(p []byte) (int, error) {
-	// Allow main to continue
-	close(w.c1)
-	// Wait for panic in main
-	<-w.c2
+func newBlockingWriter() *blockingWriter {
+	return &blockingWriter{
+		c1:   make(chan struct{}),
+		c2:   make(chan struct{}),
+		once: &sync.Once{},
+	}
+}
+
+// Write blocks on the first call until the test releases c2; subsequent
+// calls pass through without blocking. This lets a test suspend the first
+// writer mid-Write to observe concurrent callers queueing on writeMu.
+func (w *blockingWriter) Write(p []byte) (int, error) {
+	first := false
+	w.once.Do(func() {
+		first = true
+	})
+	if first {
+		close(w.c1)
+		<-w.c2
+	}
 	return len(p), nil
 }
 
-func TestConcurrentWritePanic(t *testing.T) {
-	w := blockingWriter{make(chan struct{}), make(chan struct{})}
+// TestConcurrentWriteSerialized replaces the former TestConcurrentWritePanic.
+// Under the new contract, concurrent WriteMessage calls are safely
+// serialized instead of panicking: a second caller blocks in acquireWriteMu
+// until the first finishes. This test verifies that blocking-then-unblock
+// sequence rather than asserting a panic.
+func TestConcurrentWriteSerialized(t *testing.T) {
+	w := newBlockingWriter()
 	c := newTestConn(nil, w, false)
+
+	firstDone := make(chan struct{})
 	go func() {
 		_ = c.WriteMessage(TextMessage, []byte{})
+		close(firstDone)
 	}()
 
-	// wait for goroutine to block in write.
+	// Wait for the first goroutine to block in the underlying Write (it
+	// holds writeMu at this point).
 	<-w.c1
 
-	defer func() {
-		close(w.c2)
-		if v := recover(); v != nil {
-			return
-		}
+	// The second WriteMessage must block on acquireWriteMu rather than
+	// panic. Confirm by racing it against a short timer.
+	secondDone := make(chan struct{})
+	go func() {
+		_ = c.WriteMessage(TextMessage, []byte{})
+		close(secondDone)
 	}()
+	select {
+	case <-secondDone:
+		t.Fatal("second WriteMessage should have blocked while first holds writeMu")
+	case <-time.After(50 * time.Millisecond):
+		// expected: still blocked
+	}
 
-	_ = c.WriteMessage(TextMessage, []byte{})
-	t.Fatal("should not get here")
+	// Unblock the first. Both should complete cleanly.
+	close(w.c2)
+	<-firstDone
+	<-secondDone
 }
 
 type failingReader struct{}

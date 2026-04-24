@@ -641,10 +641,9 @@ var websocketEchoHandler = http.HandlerFunc(func(w http.ResponseWriter, req *htt
 	}
 	defer wsConn.Close()
 	for {
-		writer, err := wsConn.NextWriter(BinaryMessage)
-		if err != nil {
-			break
-		}
+		// Read first so we don't hold the write mutex across a blocking
+		// read. Under the concurrent-safe-writes contract, NextWriter
+		// holds the outer write mutex until messageWriter.Close.
 		messageType, reader, err := wsConn.NextReader()
 		if err != nil {
 			break
@@ -653,10 +652,18 @@ var websocketEchoHandler = http.HandlerFunc(func(w http.ResponseWriter, req *htt
 			http.Error(w, "websocket reader not binary message type",
 				http.StatusInternalServerError)
 		}
-		_, err = io.Copy(writer, reader)
+		writer, err := wsConn.NextWriter(BinaryMessage)
 		if err != nil {
+			break
+		}
+		if _, err = io.Copy(writer, reader); err != nil {
 			http.Error(w, "websocket server io copy error",
 				http.StatusInternalServerError)
+			_ = writer.Close()
+			break
+		}
+		if err = writer.Close(); err != nil {
+			break
 		}
 	}
 })
