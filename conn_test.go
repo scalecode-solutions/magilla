@@ -94,6 +94,14 @@ func TestFraming(t *testing.T) {
 				var connBuf bytes.Buffer
 				wc := newTestConn(nil, &connBuf, isServer)
 				rc := newTestConn(chunker.f(&connBuf), nil, !isServer)
+				// TestFraming writes arbitrary byte sequences under
+				// TextMessage to exercise the frame-layout code. Skip
+				// UTF-8 validation on both sides so the synthetic
+				// payloads aren't rejected as invalid text data —
+				// this test is about framing, not message-type
+				// semantics.
+				wc.skipUTF8Validation = true
+				rc.skipUTF8Validation = true
 				if compress {
 					wc.newCompressionWriter = compressNoContextTakeover
 					rc.newDecompressionReader = decompressNoContextTakeover

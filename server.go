@@ -102,6 +102,16 @@ type Upgrader struct {
 	// negotiate. See CompressionMode for semantics. The zero value
 	// defers to EnableCompression.
 	CompressionMode CompressionMode
+
+	// SkipUTF8Validation, when true, disables RFC 6455 UTF-8 validation
+	// on TextMessage payloads in both directions. By default, incoming
+	// TextMessages with invalid UTF-8 close the connection with code
+	// 1007 and outgoing invalid TextMessages are rejected with
+	// errInvalidUTF8 before transmission. Set to true only for
+	// backward-compat with applications that send raw bytes as
+	// TextMessage (a spec violation; the correct answer is
+	// BinaryMessage).
+	SkipUTF8Validation bool
 }
 
 func effectiveCompressionMode(m CompressionMode, enable bool) CompressionMode {
@@ -292,6 +302,7 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 
 	c := newConn(netConn, true, u.ReadBufferSize, u.WriteBufferSize, u.WriteBufferPool, br, writeBuf)
 	c.subprotocol = subprotocol
+	c.skipUTF8Validation = u.SkipUTF8Validation
 
 	if compress {
 		// Server outgoing (= server->client) writes.

@@ -180,6 +180,7 @@ var (
 	errBadWriteOpCode      = errors.New("websocket: bad write message type")
 	errWriteClosed         = errors.New("websocket: write closed")
 	errInvalidControlFrame = errors.New("websocket: invalid control frame")
+	errInvalidUTF8         = errors.New("websocket: invalid utf-8 in text message")
 )
 
 // maskRand is an io.Reader for generating mask bytes. The reader is initialized
@@ -306,6 +307,24 @@ type Conn struct {
 
 	readDecompress         bool // whether last read frame had RSV1 set
 	newDecompressionReader func(io.Reader) io.ReadCloser
+
+	// skipUTF8Validation, when true, disables the RFC 6455 §6.1 / §5.6
+	// UTF-8 validation on TextMessage payloads in both directions. Set
+	// via Dialer.SkipUTF8Validation or Upgrader.SkipUTF8Validation.
+	//
+	// The default (false) streams every TextMessage byte through the
+	// DFA in utf8_dfa.go. On the read side, an invalid sequence causes
+	// messageReader.Read to send a Close(1007) and return errInvalidUTF8.
+	// On the write side, an invalid payload rejects the Write with
+	// errInvalidUTF8 before any wire traffic.
+	skipUTF8Validation bool
+
+	// readUTF8State / readUTF8Codepoint carry the UTF-8 DFA state across
+	// continuation frames of the current TextMessage. Reset by
+	// NextReader when a new TextMessage starts. Ignored (and not
+	// updated) for BinaryMessage or when skipUTF8Validation is true.
+	readUTF8State     int
+	readUTF8Codepoint rune
 }
 
 func newConn(conn net.Conn, isServer bool, readBufferSize, writeBufferSize int, writeBufferPool BufferPool, br *bufio.Reader, writeBuf []byte) *Conn {
@@ -702,7 +721,56 @@ func (c *Conn) NextWriter(messageType int) (io.WriteCloser, error) {
 		mw.compress = true
 		c.writer = w
 	}
+	// Stack a UTF-8 validator on top of the writer pipeline for TextMessage
+	// so invalid bytes are caught at Write time - before the wire sends
+	// any fragment the peer would then reject. Validator runs on the
+	// pre-compression bytes (same bytes the caller supplies).
+	if messageType == TextMessage && !c.skipUTF8Validation {
+		c.writer = &utf8ValidatingWriter{src: c.writer}
+	}
 	return c.writer, nil
+}
+
+// utf8ValidatingWriter wraps the TextMessage write pipeline and streams
+// each byte through a fresh UTF-8 DFA. On invalid input it rejects the
+// Write with errInvalidUTF8 before the underlying writer sees the bad
+// bytes, avoiding sending partial-invalid fragments to the peer. Close
+// also checks that the DFA ended in the Accept state (no truncated
+// codepoint at message end).
+type utf8ValidatingWriter struct {
+	src       io.WriteCloser
+	state     int
+	codepoint rune
+	failed    bool
+}
+
+func (w *utf8ValidatingWriter) Write(p []byte) (int, error) {
+	if w.failed {
+		return 0, errInvalidUTF8
+	}
+	for i, b := range p {
+		w.state, w.codepoint = utf8DFAStep(w.state, w.codepoint, b)
+		if w.state == utf8Reject {
+			w.failed = true
+			return i, errInvalidUTF8
+		}
+	}
+	return w.src.Write(p)
+}
+
+func (w *utf8ValidatingWriter) Close() error {
+	if w.failed {
+		// Still close the underlying so the write-mutex gets released
+		// via messageWriter.endMessage.
+		_ = w.src.Close()
+		return errInvalidUTF8
+	}
+	if w.state != utf8Accept {
+		w.failed = true
+		_ = w.src.Close()
+		return errInvalidUTF8
+	}
+	return w.src.Close()
 }
 
 type messageWriter struct {
@@ -964,7 +1032,18 @@ func (c *Conn) WritePreparedMessage(pm *PreparedMessage) error {
 //
 // Safe to call concurrently from multiple goroutines; calls are serialized
 // internally and respect the write deadline during lock acquire (#704).
+//
+// TextMessage payloads are validated as UTF-8 before transmission (RFC
+// 6455 §5.6). Invalid UTF-8 returns errInvalidUTF8 without writing any
+// bytes. Set Dialer.SkipUTF8Validation / Upgrader.SkipUTF8Validation on
+// the handshake to opt out.
 func (c *Conn) WriteMessage(messageType int, data []byte) error {
+
+	if messageType == TextMessage && !c.skipUTF8Validation {
+		if utf8DFAValidate(data) != utf8Accept {
+			return errInvalidUTF8
+		}
+	}
 
 	// The fast path writes the message as a single unfragmented frame.
 	// Skip it when compression is active or when a frame-size cap is in
@@ -1337,6 +1416,15 @@ func (c *Conn) NextReader() (messageType int, r io.Reader, err error) {
 			if c.readDecompress {
 				c.reader = c.newDecompressionReader(c.reader)
 			}
+			// Stack a UTF-8 validator on top of (optionally) the
+			// decompression reader for TextMessage, so validation runs
+			// on the decoded bytes in both the compressed and
+			// uncompressed cases. Reset per-message DFA state.
+			if frameType == TextMessage && !c.skipUTF8Validation {
+				c.readUTF8State = utf8Accept
+				c.readUTF8Codepoint = 0
+				c.reader = &utf8ValidatingReader{c: c, src: c.reader}
+			}
 			return frameType, c.reader, nil
 		}
 	}
@@ -1350,6 +1438,62 @@ func (c *Conn) NextReader() (messageType int, r io.Reader, err error) {
 	}
 
 	return noFrame, nil, c.readErr
+}
+
+// utf8ValidatingReader wraps the TextMessage reader pipeline (messageReader,
+// optionally compression-wrapped) and streams each byte through the
+// Conn's UTF-8 DFA. On invalid input it sends a Close(1007), latches a
+// permanent readErr, and returns errInvalidUTF8. On EOF it also fails
+// the connection if the DFA didn't end in the Accept state (truncated
+// multi-byte codepoint at message end).
+//
+// This wrapper only exists for the lifetime of one TextMessage; NextReader
+// installs a fresh one per message and Close on it propagates to the
+// underlying src so decompression resources are released.
+type utf8ValidatingReader struct {
+	c      *Conn
+	src    io.Reader
+	failed bool
+}
+
+func (r *utf8ValidatingReader) Read(p []byte) (int, error) {
+	if r.failed {
+		return 0, r.c.readErr
+	}
+	n, err := r.src.Read(p)
+	for i := 0; i < n; i++ {
+		r.c.readUTF8State, r.c.readUTF8Codepoint = utf8DFAStep(
+			r.c.readUTF8State, r.c.readUTF8Codepoint, p[i])
+		if r.c.readUTF8State == utf8Reject {
+			return r.rejectUTF8()
+		}
+	}
+	if err == io.EOF && r.c.readUTF8State != utf8Accept {
+		// Stream ended mid-codepoint.
+		n2, _ := r.rejectUTF8()
+		return n2, r.c.readErr
+	}
+	return n, err
+}
+
+func (r *utf8ValidatingReader) Close() error {
+	if c, ok := r.src.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
+// rejectUTF8 is called when the DFA sees an invalid byte sequence or the
+// stream ends mid-codepoint. It sends Close(1007), latches the read
+// error, and returns (0, errInvalidUTF8).
+func (r *utf8ValidatingReader) rejectUTF8() (int, error) {
+	r.failed = true
+	msg := FormatCloseMessage(CloseInvalidFramePayloadData, "")
+	_ = r.c.WriteControl(CloseMessage, msg, time.Now().Add(writeWait))
+	if r.c.readErr == nil {
+		r.c.readErr = errInvalidUTF8
+	}
+	return 0, errInvalidUTF8
 }
 
 type messageReader struct{ c *Conn }

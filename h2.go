@@ -551,6 +551,7 @@ func (d *Dialer) dialHTTP2(
 
 	c := newConn(streamConn, false, d.ReadBufferSize, d.WriteBufferSize, d.WriteBufferPool, nil, nil)
 	c.disableMask = d.DisableClientMask
+	c.skipUTF8Validation = d.SkipUTF8Validation
 	c.subprotocol = resp.Header.Get("Sec-WebSocket-Protocol")
 	if compress {
 		if writeTakeover {
@@ -685,6 +686,7 @@ func (u *Upgrader) upgradeHTTP2(w http.ResponseWriter, r *http.Request, response
 
 	c := newConn(streamConn, true, u.ReadBufferSize, u.WriteBufferSize, u.WriteBufferPool, nil, nil)
 	c.subprotocol = subprotocol
+	c.skipUTF8Validation = u.SkipUTF8Validation
 	if compress {
 		if serverWriteTakeover {
 			c.writeCompressFactory = &contextTakeoverWriterFactory{}

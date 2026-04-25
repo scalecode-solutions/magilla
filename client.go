@@ -173,6 +173,18 @@ type Dialer struct {
 	// unmasked client frames. Only enable this when you control both
 	// sides and the server explicitly tolerates unmasked client frames.
 	DisableClientMask bool
+
+	// SkipUTF8Validation, when true, disables the RFC 6455 requirement
+	// that TextMessage payloads be valid UTF-8 in both directions. By
+	// default, incoming TextMessages with invalid UTF-8 close the
+	// connection with code 1007 (CloseInvalidFramePayloadData) and
+	// outgoing invalid TextMessages are rejected with errInvalidUTF8
+	// before transmission.
+	//
+	// Set to true only for backward-compat with applications that send
+	// raw bytes as TextMessage (a spec violation, but occasionally in
+	// the wild); the correct answer for such callers is BinaryMessage.
+	SkipUTF8Validation bool
 }
 
 // Dial creates a new client connection by calling DialContext with a background context.
@@ -399,6 +411,7 @@ func (d *Dialer) DialContext(ctx context.Context, urlStr string, requestHeader h
 
 	conn := newConn(netConn, false, d.ReadBufferSize, d.WriteBufferSize, d.WriteBufferPool, nil, nil)
 	conn.disableMask = d.DisableClientMask
+	conn.skipUTF8Validation = d.SkipUTF8Validation
 
 	if err := req.Write(netConn); err != nil {
 		return nil, nil, err
