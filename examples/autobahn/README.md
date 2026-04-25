@@ -1,18 +1,22 @@
-# Test Server
+# Autobahn Test Server
 
-This package contains a server for the [Autobahn WebSockets Test Suite](https://github.com/crossbario/autobahn-testsuite).
+A test server for the [Autobahn WebSocket Test Suite](https://github.com/crossbario/autobahn-testsuite). Run the suite to validate magilla's RFC 6455 + RFC 7692 conformance.
 
-To test the server, run
+See [RESULTS.md](./RESULTS.md) for the latest run summary (zero protocol failures across ~2,200 sub-cases).
 
-    go run server.go
+## Running the suite
 
-and start the client test driver
+```bash
+go run server.go &
+mkdir -p reports
+docker run --rm \
+    -v "$(pwd)/config:/config" \
+    -v "$(pwd)/reports:/reports" \
+    --add-host=host.docker.internal:host-gateway \
+    crossbario/autobahn-testsuite \
+    wstest -m fuzzingclient -s /config/fuzzingclient.json
+```
 
-    mkdir -p reports
-    docker run -it --rm \
-        -v ${PWD}/config:/config \
-        -v ${PWD}/reports:/reports \
-        crossbario/autobahn-testsuite \
-        wstest -m fuzzingclient -s /config/fuzzingclient.json
+The full HTML report is written to `reports/index.html`. The fuzzer takes 10–15 minutes against five endpoint variants exercising different read/write API combinations.
 
-When the client completes, it writes a report to reports/index.html.
+`--add-host=host.docker.internal:host-gateway` is needed on Linux; Docker Desktop on macOS / Windows resolves it automatically.
