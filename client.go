@@ -142,6 +142,15 @@ type Dialer struct {
 	// in responses.
 	Jar http.CookieJar
 
+	// MaxErrorBodySize caps the number of bytes read from a failed
+	// handshake response body and returned to the caller for debugging
+	// via the *http.Response's Body. Default 0 means use the historical
+	// 1024-byte limit. Servers with verbose error pages (rich HTML
+	// error templates, JSON-RPC-style failure envelopes) can exceed
+	// that; raise this to see the full message in the returned
+	// response.
+	MaxErrorBodySize int
+
 	// HTTP2 controls whether the dialer attempts an RFC 8441 Extended
 	// CONNECT handshake over HTTP/2. The default HTTP2Disabled preserves
 	// the classic HTTP/1.1 Upgrade behavior byte-for-byte. Set to
@@ -439,8 +448,12 @@ func (d *Dialer) DialContext(ctx context.Context, urlStr string, requestHeader h
 		resp.Header.Get("Sec-Websocket-Accept") != computeAcceptKey(challengeKey) {
 		// Before closing the network connection on return from this
 		// function, slurp up some of the response to aid application
-		// debugging.
-		buf := make([]byte, 1024)
+		// debugging. Capped by Dialer.MaxErrorBodySize (default 1024).
+		limit := d.MaxErrorBodySize
+		if limit <= 0 {
+			limit = 1024
+		}
+		buf := make([]byte, limit)
 		n, _ := io.ReadFull(resp.Body, buf)
 		resp.Body = io.NopCloser(bytes.NewReader(buf[:n]))
 		return nil, resp, ErrBadHandshake

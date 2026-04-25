@@ -482,9 +482,13 @@ func (d *Dialer) dialHTTP2(
 	if resp.StatusCode != http.StatusOK {
 		_ = pw.Close()
 		streamCancel()
-		// Drain a small prefix of the body to aid debugging, matching
-		// h1 behavior.
-		buf := make([]byte, 1024)
+		// Drain a bounded prefix of the body to aid debugging, matching
+		// h1 behavior. Cap from Dialer.MaxErrorBodySize.
+		limit := d.MaxErrorBodySize
+		if limit <= 0 {
+			limit = 1024
+		}
+		buf := make([]byte, limit)
 		n, _ := io.ReadFull(resp.Body, buf)
 		_ = resp.Body.Close()
 		resp.Body = io.NopCloser(strings.NewReader(string(buf[:n])))
