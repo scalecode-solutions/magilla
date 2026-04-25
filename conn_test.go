@@ -1218,6 +1218,135 @@ func TestReadMessageContext_SuccessPath(t *testing.T) {
 	}
 }
 
+// TestWriteMessageContext_Cancelled blocks a write on a synchronous
+// net.Pipe (no reader on the other end), cancels the context, and
+// verifies the call returns context.Canceled promptly.
+func TestWriteMessageContext_Cancelled(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	client := newConn(cConn, false, 1024, 1024, nil, nil, nil)
+	defer client.Close()
+	defer sConn.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	// Large enough to certainly block on net.Pipe (which has no buffer).
+	err := client.WriteMessageContext(ctx, BinaryMessage, make([]byte, 4096))
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want context.Canceled", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("cancel took too long: %v", elapsed)
+	}
+}
+
+// TestWriteMessageContext_Deadline asserts that a ctx.WithTimeout
+// causes WriteMessageContext to return context.DeadlineExceeded near
+// the deadline.
+func TestWriteMessageContext_Deadline(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	client := newConn(cConn, false, 1024, 1024, nil, nil, nil)
+	defer client.Close()
+	defer sConn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := client.WriteMessageContext(ctx, BinaryMessage, make([]byte, 4096))
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed < 80*time.Millisecond || elapsed > 500*time.Millisecond {
+		t.Errorf("deadline fired at %v, expected ~100ms", elapsed)
+	}
+}
+
+// TestWriteMessageContext_SuccessPath: a write that completes before ctx
+// fires returns normally and the connection stays clean.
+func TestWriteMessageContext_SuccessPath(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	client := newConn(cConn, false, 1024, 1024, nil, nil, nil)
+	server := newConn(sConn, true, 1024, 1024, nil, nil, nil)
+	defer client.Close()
+	defer server.Close()
+
+	// Drain the server side so the client write doesn't block.
+	go func() {
+		_, _, _ = server.ReadMessage()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := client.WriteMessageContext(ctx, TextMessage, []byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestWriteControlContext_Cancelled cancels mid-WriteControl and
+// confirms the call returns ctx.Err().
+func TestWriteControlContext_Cancelled(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	client := newConn(cConn, false, 1024, 1024, nil, nil, nil)
+	defer client.Close()
+	defer sConn.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	err := client.WriteControlContext(ctx, PingMessage, []byte("p"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want context.Canceled", err)
+	}
+}
+
+// TestNextWriterContext_Cancelled tests the streaming-writer
+// acquisition path under ctx cancellation. Since acquiring the write
+// mutex is fast on a fresh conn (no contention), we induce the block
+// by holding the mutex from another goroutine.
+func TestNextWriterContext_Cancelled(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	client := newConn(cConn, false, 1024, 1024, nil, nil, nil)
+	defer client.Close()
+	defer sConn.Close()
+
+	// Hold the write mutex by starting a NextWriter and not closing it.
+	holder, err := client.NextWriter(BinaryMessage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err = client.NextWriterContext(ctx, BinaryMessage)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) && err != errWriteTimeout {
+		// errWriteTimeout is what acquireWriteMu surfaces when the
+		// deadline is in the past; the watchdog might not have fired
+		// before that path returns. Either is correct.
+		t.Fatalf("got %v, want context.DeadlineExceeded or errWriteTimeout", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("call took too long: %v", elapsed)
+	}
+}
+
 // TestCloseGracefully exercises the initiator side of the RFC 6455 close
 // handshake. Two Conns are wired through a net.Pipe; the client calls
 // CloseGracefully and the server runs a plain read loop so the default

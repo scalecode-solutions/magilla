@@ -475,6 +475,33 @@ func (c *Conn) acquireWriteMu(deadline time.Time) error {
 	}
 }
 
+// installWriteContextWatchdog starts a goroutine that watches ctx; on
+// cancellation, it forces any in-flight write to abort by installing a
+// past-time write deadline on the underlying net.Conn. The returned
+// cleanup must be called exactly once; it stops the watcher and clears
+// the net.Conn deadline. Subsequent writes on the *Conn re-apply the
+// per-frame deadline from c.writeDeadline, so clearing here is safe.
+func (c *Conn) installWriteContextWatchdog(ctx context.Context) func() {
+	stopCh := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-stopCh:
+		case <-ctx.Done():
+			// Past-time deadline unblocks any in-flight c.conn.Write
+			// with a net.Error timeout; our read path treats timeouts
+			// as recoverable, so the connection stays usable.
+			_ = c.conn.SetWriteDeadline(time.Unix(1, 0))
+		}
+	}()
+	return func() {
+		close(stopCh)
+		<-done
+		_ = c.conn.SetWriteDeadline(time.Time{})
+	}
+}
+
 // releaseWriteMu releases the outer write mutex acquired by acquireWriteMu.
 func (c *Conn) releaseWriteMu() {
 	c.writeMu <- struct{}{}
@@ -970,6 +997,72 @@ func (c *Conn) WriteMessage(messageType int, data []byte) error {
 		return err
 	}
 	return w.Close()
+}
+
+// WriteMessageContext is like WriteMessage but aborts if ctx is cancelled
+// or its deadline passes before the write completes. The connection
+// remains usable after a context cancellation: subsequent writes
+// re-apply the per-frame deadline normally.
+//
+// WriteMessageContext takes over the connection's net.Conn write
+// deadline for the duration of the call. Callers that mix
+// SetWriteDeadline with this method should pick one strategy.
+func (c *Conn) WriteMessageContext(ctx context.Context, messageType int, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = c.SetWriteDeadline(deadline)
+	}
+	stop := c.installWriteContextWatchdog(ctx)
+	err := c.WriteMessage(messageType, data)
+	stop()
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+// WriteControlContext is the context-aware variant of WriteControl. It
+// uses ctx.Deadline() (if any) as the WriteControl deadline and watches
+// ctx.Done() to abort an in-flight control-frame write.
+//
+// Like WriteControl, it can interleave with an active streaming writer.
+func (c *Conn) WriteControlContext(ctx context.Context, messageType int, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	deadline, _ := ctx.Deadline()
+	stop := c.installWriteContextWatchdog(ctx)
+	err := c.WriteControl(messageType, data, deadline)
+	stop()
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+// NextWriterContext is like NextWriter but applies ctx to the
+// lock-acquire step. Once the writer is returned, ctx no longer governs
+// it; reads on the returned writer are bounded by SetWriteDeadline only.
+// This mirrors NextReaderContext's contract.
+//
+// The caller MUST Close the returned writer (same constraint as
+// NextWriter) — the connection's write mutex is held until Close.
+func (c *Conn) NextWriterContext(ctx context.Context, messageType int) (io.WriteCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = c.SetWriteDeadline(deadline)
+	}
+	stop := c.installWriteContextWatchdog(ctx)
+	w, err := c.NextWriter(messageType)
+	stop()
+	if err != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return w, err
 }
 
 // SetWriteDeadline sets the write deadline on the underlying network
