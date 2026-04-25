@@ -9,6 +9,10 @@
 - Correctness fixes for hijacked write buffer reuse, idempotent compression `Close()`, recoverable read timeouts, empty proxy auth passwords, and CookieJar/Cookie header merging
 - `interface{}` → `any`, typos fixed, deprecations marked, appengine compat removed
 
+**Migrating from gorilla/websocket?** Read [MIGRATING.md](./MIGRATING.md). magilla is not a transparent drop-in — module path, package name, and a couple of behavior changes (notably: `NextWriter` requires explicit `Close()`, and `TextMessage` payloads are validated as UTF-8 by default).
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full feature list with upstream issue references.
+
 ## Install
 
 ```
