@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/bowler.svg" width="160" alt="magilla bowler">
+</p>
+
 # magilla
 
 > *a maintained fork of [gorilla/websocket](https://github.com/gorilla/websocket) — derby and bowtie required, shirt optional.* 🦍

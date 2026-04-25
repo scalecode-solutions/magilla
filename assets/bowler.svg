@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  magilla logo — Magilla Gorilla's bowler.
+
+  Per Hanna-Barbera's 1964 model sheets and Wikipedia: an undersized
+  purple derby with a green hatband speckled with small black dots.
+
+  Pure SVG, no external assets. ViewBox 256x192. Scales cleanly from
+  16x16 favicon to a 1280x640 social card.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 192" role="img" aria-label="magilla bowler hat">
+  <title>magilla</title>
+
+  <!-- soft ground shadow under the brim -->
+  <ellipse cx="128" cy="170" rx="98" ry="6" fill="#000" opacity="0.18"/>
+
+  <!-- brim: front-facing oval with slight upturn at the sides.
+       Drawn as the underside (deep shadow) plus the top edge. -->
+  <ellipse cx="128" cy="155" rx="104" ry="14" fill="#1d1730"/>
+  <ellipse cx="128" cy="151" rx="104" ry="11" fill="#3b2557"/>
+
+  <!-- crown body: rounded dome of a derby. The bottom flares slightly
+       to meet the brim. -->
+  <path d="M 60 152
+           C 60 100, 70 36, 128 36
+           C 186 36, 196 100, 196 152
+           C 196 156, 60 156, 60 152 Z"
+        fill="#6a1b9a"/>
+
+  <!-- left-side highlight on the crown (gives it dimension) -->
+  <path d="M 76 142
+           C 70 100, 80 52, 110 42"
+        stroke="#8e24aa" stroke-width="6" stroke-linecap="round" fill="none" opacity="0.85"/>
+
+  <!-- right-side shadow on the crown -->
+  <path d="M 188 150
+           C 188 110, 180 60, 158 44"
+        stroke="#4a0d70" stroke-width="5" stroke-linecap="round" fill="none" opacity="0.55"/>
+
+  <!-- green hatband: a curved strip wrapping the base of the crown -->
+  <path d="M 60 142
+           C 95 156, 161 156, 196 142
+           L 196 154
+           C 161 168, 95 168, 60 154 Z"
+        fill="#4caf50"/>
+
+  <!-- subtle band shadow (gives roundness) -->
+  <path d="M 60 142
+           C 95 156, 161 156, 196 142"
+        stroke="#2e7d32" stroke-width="1.2" fill="none" opacity="0.6"/>
+
+  <!-- black speckles on the hatband -->
+  <circle cx="80"  cy="151" r="2.2" fill="#0a0a0a"/>
+  <circle cx="100" cy="156" r="2.2" fill="#0a0a0a"/>
+  <circle cx="122" cy="158" r="2.4" fill="#0a0a0a"/>
+  <circle cx="148" cy="158" r="2.2" fill="#0a0a0a"/>
+  <circle cx="170" cy="155" r="2.2" fill="#0a0a0a"/>
+  <circle cx="188" cy="148" r="1.8" fill="#0a0a0a"/>
+  <circle cx="70"  cy="148" r="1.8" fill="#0a0a0a"/>
+</svg>
