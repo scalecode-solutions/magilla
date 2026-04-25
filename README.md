@@ -1,6 +1,6 @@
 # magilla
 
-A Go WebSocket library. Fork of [gorilla/websocket](https://github.com/gorilla/websocket), modernized and extended.
+> *a maintained fork of [gorilla/websocket](https://github.com/gorilla/websocket) — derby and bowtie required, shirt optional.* 🦍
 
 ## What's different from gorilla/websocket
 
