@@ -76,6 +76,30 @@ w, err := c.NextWriterContext(ctx, mt)
 
 On `ctx.Done()`, an in-flight read/write is unblocked via a past-time deadline; the resulting timeout is translated to `ctx.Err()`. Connections remain usable for subsequent reads/writes (the foundation fix that treats read timeouts as recoverable enables this). Closes the gap that was the most-cited reason for migrating away to coder/websocket.
 
+### Built-in UTF-8 validation for TextMessage (RFC 6455 §6.1)
+
+Every TextMessage byte is now streamed through a per-byte UTF-8 DFA on
+read (with state carried across continuation frames) and on write. Invalid
+sequences fail fast: reads send Close 1007 and surface `errInvalidUTF8`;
+writes return `errInvalidUTF8` before any wire bytes leak. Truncated
+multi-byte codepoints at message end also fail.
+
+```go
+// Default behavior — no opt-in needed:
+mt, p, err := c.ReadMessage()
+if errors.Is(err, magilla.ErrInvalidUTF8) { /* peer sent garbage */ }
+```
+
+Opt-out via `Dialer.SkipUTF8Validation` / `Upgrader.SkipUTF8Validation`
+for callers that intentionally send raw bytes as TextMessage (a spec
+violation; the right answer is `BinaryMessage`).
+
+Flips the 12 NON-STRICT cases from the previous autobahn run (all case
+6.4.x: "invalid UTF-8 across multiple frames") to OK strict-pass — see
+`examples/autobahn/RESULTS.md`. The application-level UTF-8 validator
+that lived in the autobahn example as a workaround is now redundant
+and removed.
+
 ### Handshake knobs
 
 - `Upgrader.NegotiateSubprotocol func(r, offered) string` — pick a subprotocol based on request context instead of a static list (#606, #480).

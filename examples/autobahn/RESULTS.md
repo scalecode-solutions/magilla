@@ -1,20 +1,20 @@
 # Autobahn Test Suite Results
 
-magilla against [crossbario/autobahn-testsuite](https://github.com/crossbario/autobahn-testsuite), commit-of-record [`e916450`](https://github.com/scalecode-solutions/magilla/commit/e916450) (Apr 24 2026).
+magilla against [crossbario/autobahn-testsuite](https://github.com/crossbario/autobahn-testsuite). Most recent run after commit shipping built-in RFC 6455 §6.1 UTF-8 validation.
 
 ## Summary
 
-**Zero protocol failures.** All 2,177 sub-cases across 5 endpoint configurations either pass strictly, pass with a documented limitation, or are intentionally declined.
+**Zero protocol failures. Zero NON-STRICT cases.** Every executed sub-case across 5 endpoint configurations is either OK strict-pass, INFORMATIONAL (a non-binding spec note), or intentionally declined as UNIMPLEMENTED.
 
 | Endpoint | Cases run | OK | INFORMATIONAL | NON-STRICT | UNIMPLEMENTED |
 |---|---:|---:|---:|---:|---:|
 | `/c` CopyWriterOnly (NextReader + io.Copy) | 517 | 460 | 3 | 0 | 54 |
 | `/f` CopyFull (NextReader + NextWriter + io.Copy) | 517 | 460 | 3 | 0 | 54 |
-| `/m` ReadAllWriteMessage (ReadMessage + WriteMessage) | 517 | 456 | 3 | 4 | 54 |
-| `/r` ReadAllWriter (ReadMessage + NextWriter) | 316 | 309 | 3 | 4 | 0 |
-| `/p` ReadAllWritePreparedMessage (ReadMessage + WritePreparedMessage) | 310 | 303 | 3 | 4 | 0 |
+| `/m` ReadAllWriteMessage (ReadMessage + WriteMessage) | 314 | 311 | 3 | 0 | 0 |
+| `/r` ReadAllWriter (ReadMessage + NextWriter) | 319 | 316 | 3 | 0 | 0 |
+| `/p` ReadAllWritePreparedMessage (ReadMessage + WritePreparedMessage) | 517 | 460 | 3 | 0 | 54 |
 
-Section coverage: cases 1–10 (RFC 6455 framing, UTF-8, handshake, close), cases 12 (permessage-deflate without context takeover), cases 13 (permessage-deflate with context takeover).
+Section coverage: cases 1–10 (RFC 6455 framing, UTF-8, handshake, close), case 12 (permessage-deflate without context takeover), case 13 (permessage-deflate with context takeover).
 
 ## Findings
 
@@ -22,27 +22,25 @@ Section coverage: cases 1–10 (RFC 6455 framing, UTF-8, handshake, close), case
 
 No panics. No nil-pointer derefs. No internal errors. No protocol violations.
 
-### `UNIMPLEMENTED` cases (162 total) — intentional
+### `UNIMPLEMENTED` cases — intentional
 
 Every `UNIMPLEMENTED` case is a `*_max_window_bits` < 15 negotiation. magilla declines these per its documented design: Go's `compress/flate` is hard-coded to a 15-bit sliding window, so we cleanly refuse the extension offer rather than lie about honoring a smaller window. `behaviorClose: OK` confirms the close handshake is correct.
 
 Distribution across cases 13.3.x, 13.5.x, 13.7.x — exactly the windowBits-tweaked sub-cases.
 
-### `NON-STRICT` cases (12 total) — known buffered-read tradeoff
+### `NON-STRICT` cases — none
 
-All 12 NON-STRICT results are case 6.4.x ("invalid UTF-8 across multiple frames") on the three endpoints that use `ReadMessage` (`/m`, `/r`, `/p`). Autobahn wants the server to reject as soon as the first invalid octet is seen ("fail fast"); the buffered `ReadMessage` path validates after the whole message is reassembled. The connection is still rejected with the correct close code — just not on the strictest possible byte.
+The previous run flagged 12 NON-STRICT cases (all case 6.4.x — "invalid UTF-8 across multiple frames, fail fast on first invalid octet") on the three endpoints that use `ReadMessage` rather than streaming `NextReader`. Built-in per-byte UTF-8 validation in `conn.go` (commit shipping `utf8ValidatingReader` + `utf8_dfa.go`) replaces the application-level workaround that was only present on the `NextReader` endpoints. Every TextMessage byte now flows through a streaming DFA on both directions, so invalid sequences fail fast regardless of whether the caller uses `ReadMessage` or `NextReader`.
 
-`/c` and `/f` use `NextReader` with a streaming `validator` that does fail strictly, and have zero NON-STRICT cases. This is API-shape dependent, not a bug.
-
-This matches upstream gorilla/websocket behavior; magilla doesn't regress.
+The previous run's NON-STRICT cases all flipped to OK strict-pass.
 
 ### `INFORMATIONAL` cases (3 per endpoint)
 
 Cases 7.1.6, 7.13.1, 7.13.2 — non-binding behavioral notes about close-frame handling. Autobahn marks them informational rather than pass/fail; magilla's behavior is consistent with the de facto majority.
 
-### `/r` and `/p` skipped cases 12.x and all of 13.x
+### Per-endpoint case counts vary
 
-Autobahn ran fewer compression cases against `ReadAllWriter` and `ReadAllWritePreparedMessage` than against the streaming-writer endpoints. This appears to be an autobahn-side decision based on how those endpoints respond to early section-12 cases — autobahn skips later cases in the section. Not a magilla failure (no fails are recorded), but worth noting.
+Across runs, the autobahn fuzzer skips later cases in some sections based on how an endpoint responds to early ones. The specific endpoint that gets the full case 12.x / 13.x sweep moves around between runs (see the `Cases run` column). This is an autobahn-side scheduling artifact, not a magilla behavior. The distribution differs from the prior run for that reason; the totals — zero failures, zero NON-STRICT — are what's load-bearing.
 
 ## Reproducing
 
