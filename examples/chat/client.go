@@ -35,6 +35,12 @@ var (
 var upgrader = magilla.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
+	// Chat traffic tends to be repetitive (recurring usernames,
+	// templates, formatting); context-takeover compression is a clear
+	// win at the cost of ~600 KiB to 1.2 MiB of compressor state per
+	// connection. Switch to CompressionModeNoContextTakeover or omit
+	// to fall back to gorilla's default behavior.
+	CompressionMode: magilla.CompressionModeContextTakeover,
 }
 
 // Client is a middleman between the websocket connection and the hub.
@@ -56,7 +62,12 @@ type Client struct {
 func (c *Client) readPump() {
 	defer func() {
 		c.hub.unregister <- c
-		c.conn.Close()
+		// CloseGracefully runs the RFC 6455 close handshake. If the
+		// peer already initiated close (a CloseError surfaced from
+		// ReadMessage above), the default close handler has echoed a
+		// Close frame; CloseGracefully short-circuits to a plain
+		// Close in that case.
+		_ = c.conn.CloseGracefully(magilla.CloseNormalClosure, "", time.Now().Add(writeWait))
 	}()
 	c.conn.SetReadLimit(maxMessageSize)
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))

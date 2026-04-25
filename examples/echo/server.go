@@ -11,13 +11,21 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/scalecode-solutions/magilla"
 )
 
 var addr = flag.String("addr", "localhost:8080", "http service address")
 
-var upgrader = magilla.Upgrader{} // use default options
+var upgrader = magilla.Upgrader{
+	// Enable RFC 7692 with context takeover. For an echo server the
+	// dictionary persistence is a wash; this is just here to demo the
+	// option. Switch to CompressionModeNoContextTakeover for the
+	// classic gorilla behavior or omit the field entirely to disable
+	// compression.
+	CompressionMode: magilla.CompressionModeContextTakeover,
+}
 
 func echo(w http.ResponseWriter, r *http.Request) {
 	c, err := upgrader.Upgrade(w, r, nil)
@@ -25,7 +33,14 @@ func echo(w http.ResponseWriter, r *http.Request) {
 		log.Print("upgrade:", err)
 		return
 	}
-	defer c.Close()
+	// CloseGracefully runs the full RFC 6455 close handshake. It's a
+	// no-op against a peer that already initiated close (the default
+	// close handler will have echoed a Close frame and the deferred
+	// CloseGracefully short-circuits to a plain Close).
+	defer func() {
+		_ = c.CloseGracefully(magilla.CloseNormalClosure, "", time.Now().Add(time.Second))
+	}()
+
 	for {
 		mt, message, err := c.ReadMessage()
 		if err != nil {
@@ -33,8 +48,7 @@ func echo(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		log.Printf("recv: %s", message)
-		err = c.WriteMessage(mt, message)
-		if err != nil {
+		if err := c.WriteMessage(mt, message); err != nil {
 			log.Println("write:", err)
 			break
 		}

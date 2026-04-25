@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/url"
@@ -23,8 +24,11 @@ func main() {
 	flag.Parse()
 	log.SetFlags(0)
 
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt)
+	// signal.NotifyContext binds Ctrl-C to ctx cancellation, so any
+	// blocking ReadMessageContext / WriteMessageContext call unblocks
+	// cleanly when the user interrupts.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
 	u := url.URL{Scheme: "ws", Host: *addr, Path: "/echo"}
 	log.Printf("connecting to %s", u.String())
@@ -40,7 +44,7 @@ func main() {
 	go func() {
 		defer close(done)
 		for {
-			_, message, err := c.ReadMessage()
+			_, message, err := c.ReadMessageContext(ctx)
 			if err != nil {
 				log.Println("read:", err)
 				return
@@ -57,24 +61,17 @@ func main() {
 		case <-done:
 			return
 		case t := <-ticker.C:
-			err := c.WriteMessage(magilla.TextMessage, []byte(t.String()))
-			if err != nil {
+			if err := c.WriteMessageContext(ctx, magilla.TextMessage, []byte(t.String())); err != nil {
 				log.Println("write:", err)
 				return
 			}
-		case <-interrupt:
+		case <-ctx.Done():
 			log.Println("interrupt")
-
-			// Cleanly close the connection by sending a close message and then
-			// waiting (with timeout) for the server to close the connection.
-			err := c.WriteMessage(magilla.CloseMessage, magilla.FormatCloseMessage(magilla.CloseNormalClosure, ""))
-			if err != nil {
-				log.Println("write close:", err)
-				return
-			}
-			select {
-			case <-done:
-			case <-time.After(time.Second):
+			// CloseGracefully encapsulates the full RFC 6455 close
+			// handshake: send Close, drain reads until peer echoes
+			// (or deadline), tear down the net.Conn.
+			if err := c.CloseGracefully(magilla.CloseNormalClosure, "", time.Now().Add(time.Second)); err != nil {
+				log.Println("close:", err)
 			}
 			return
 		}
