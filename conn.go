@@ -6,6 +6,7 @@ package magilla
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -1316,6 +1317,89 @@ func (r *messageReader) Close() error {
 func (c *Conn) ReadMessage() (messageType int, p []byte, err error) {
 	var r io.Reader
 	messageType, r, err = c.NextReader()
+	if err != nil {
+		return messageType, nil, err
+	}
+	p, err = io.ReadAll(r)
+	return messageType, p, err
+}
+
+// NextReaderContext is like NextReader but aborts if ctx is cancelled or
+// its deadline passes before the next message header arrives. On
+// cancellation it returns ctx.Err() and the connection remains usable —
+// subsequent reads on the same connection work normally. Per-frame read
+// timeouts are treated as recoverable (see fix for #1007).
+//
+// NextReaderContext takes over the connection's read deadline for the
+// duration of the wait. Callers that already use SetReadDeadline should
+// prefer one deadline-management strategy or the other, not both.
+//
+// The returned io.Reader is not bound to ctx; reads on it are governed
+// by SetReadDeadline only. This mirrors how the stdlib http.Request.Body
+// works after context cancellation.
+//
+// NextReaderContext is not safe for concurrent use with any other read
+// method (same contract as NextReader).
+func (c *Conn) NextReaderContext(ctx context.Context) (messageType int, r io.Reader, err error) {
+	if err := ctx.Err(); err != nil {
+		return noFrame, nil, err
+	}
+
+	// Propagate the caller's deadline (if any) to the underlying
+	// connection. For a deadline-less context we rely on the watchdog
+	// goroutine below to kick the read when ctx is cancelled.
+	if deadline, ok := ctx.Deadline(); ok {
+		if derr := c.SetReadDeadline(deadline); derr != nil {
+			return noFrame, nil, derr
+		}
+	}
+
+	// Watchdog goroutine: on ctx cancellation, force the in-flight
+	// read to return by installing a past-time read deadline. Our
+	// NextReader treats the resulting net.Error timeout as recoverable
+	// (doesn't latch readErr), so the connection is reusable after
+	// the watchdog fires.
+	stop := make(chan struct{})
+	watcher := make(chan struct{})
+	go func() {
+		defer close(watcher)
+		select {
+		case <-stop:
+		case <-ctx.Done():
+			// A past-time deadline makes any in-flight or subsequent
+			// Read return net.Error with Timeout=true.
+			_ = c.SetReadDeadline(time.Unix(1, 0))
+		}
+	}()
+
+	mt, rdr, err := c.NextReader()
+
+	// Retire the watchdog and clear the deadline we installed.
+	close(stop)
+	<-watcher
+	// Reset the deadline to "no deadline" so reads on the returned
+	// reader (and future calls) aren't stuck with our past-time
+	// sentinel. Callers who want a deadline on the returned reader
+	// set it themselves.
+	_ = c.SetReadDeadline(time.Time{})
+
+	// When ctx fired, translate the underlying timeout/close error
+	// into the context error that the caller expects.
+	if err != nil && ctx.Err() != nil {
+		return noFrame, nil, ctx.Err()
+	}
+	return mt, rdr, err
+}
+
+// ReadMessageContext is like ReadMessage but aborts if ctx is cancelled
+// or its deadline passes. On cancellation it returns ctx.Err() and the
+// connection remains usable for subsequent reads.
+//
+// ReadMessageContext is not safe for concurrent use with any other read
+// method (same contract as ReadMessage).
+func (c *Conn) ReadMessageContext(ctx context.Context) (messageType int, p []byte, err error) {
+	var r io.Reader
+	messageType, r, err = c.NextReaderContext(ctx)
 	if err != nil {
 		return messageType, nil, err
 	}

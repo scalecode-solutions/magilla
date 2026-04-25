@@ -7,6 +7,7 @@ package magilla
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -1086,6 +1087,134 @@ func TestSetWriteFrameSize(t *testing.T) {
 				t.Errorf("payload mismatch: got %d bytes, want %d", len(got), len(payload))
 			}
 		})
+	}
+}
+
+// TestReadMessageContext_CancelledBeforeCall asserts that ReadMessageContext
+// returns the context error immediately when the ctx is already cancelled
+// at call time, without blocking on the connection.
+func TestReadMessageContext_CancelledBeforeCall(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	client := newConn(cConn, false, 1024, 1024, nil, nil, nil)
+	defer client.Close()
+	defer sConn.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	_, _, err := client.ReadMessageContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want context.Canceled", err)
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Errorf("call blocked for %v on pre-cancelled ctx", d)
+	}
+}
+
+// TestReadMessageContext_CancelledDuringRead cancels a context after
+// ReadMessageContext is blocked waiting for a message. The call must
+// return ctx.Err() promptly and the connection must stay usable for a
+// subsequent non-context read.
+func TestReadMessageContext_CancelledDuringRead(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	client := newConn(cConn, false, 1024, 1024, nil, nil, nil)
+	server := newConn(sConn, true, 1024, 1024, nil, nil, nil)
+	defer client.Close()
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Cancel after a short delay while the read is blocking.
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, _, err := client.ReadMessageContext(ctx)
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want context.Canceled", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("cancel took too long: %v", elapsed)
+	}
+
+	// The connection should still be healthy. Kick a message from the
+	// server and read it on the client via the plain ReadMessage path.
+	recvErr := make(chan error, 1)
+	go func() {
+		mt, data, rerr := client.ReadMessage()
+		if rerr != nil {
+			recvErr <- rerr
+			return
+		}
+		if mt != TextMessage || string(data) != "post-cancel" {
+			recvErr <- fmt.Errorf("got mt=%d data=%q", mt, data)
+			return
+		}
+		recvErr <- nil
+	}()
+	if err := server.WriteMessage(TextMessage, []byte("post-cancel")); err != nil {
+		t.Fatalf("server WriteMessage: %v", err)
+	}
+	select {
+	case err := <-recvErr:
+		if err != nil {
+			t.Fatalf("post-cancel ReadMessage: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no recovery read within deadline")
+	}
+}
+
+// TestReadMessageContext_Deadline verifies that a ctx.WithDeadline is
+// honored exactly like ctx.WithCancel: the read returns context.DeadlineExceeded
+// around the deadline and the connection stays usable.
+func TestReadMessageContext_Deadline(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	client := newConn(cConn, false, 1024, 1024, nil, nil, nil)
+	defer client.Close()
+	defer sConn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, _, err := client.ReadMessageContext(ctx)
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed < 100*time.Millisecond || elapsed > 500*time.Millisecond {
+		t.Errorf("deadline fired at %v, expected ~120ms", elapsed)
+	}
+}
+
+// TestReadMessageContext_SuccessPath is the happy path: a message
+// arrives before ctx fires and the call returns normally.
+func TestReadMessageContext_SuccessPath(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	client := newConn(cConn, false, 1024, 1024, nil, nil, nil)
+	server := newConn(sConn, true, 1024, 1024, nil, nil, nil)
+	defer client.Close()
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = server.WriteMessage(TextMessage, []byte("hello"))
+	}()
+
+	mt, data, err := client.ReadMessageContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mt != TextMessage || string(data) != "hello" {
+		t.Fatalf("got mt=%d data=%q", mt, data)
 	}
 }
 
