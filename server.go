@@ -55,6 +55,18 @@ type Upgrader struct {
 	// When NegotiateSubprotocol is set, this field is ignored.
 	Subprotocols []string
 
+	// IsValidChallengeKey, when non-nil, overrides the default
+	// Sec-WebSocket-Key validator. The default (RFC 6455 §4.1) requires
+	// the key to decode to exactly 16 bytes from base64. Some non-browser
+	// clients (notably the Nintendo Switch and other game consoles) ship
+	// out-of-spec key formats; servers that need to accept them can
+	// supply a custom validator here.
+	//
+	// Returning false rejects the handshake with 400 Bad Request. The
+	// validator is not involved in computing the Sec-WebSocket-Accept
+	// response header; that always follows RFC 6455.
+	IsValidChallengeKey func(challengeKey string) bool
+
 	// NegotiateSubprotocol, when non-nil, overrides the Subprotocols-based
 	// negotiation. It is called with the incoming request and the list of
 	// subprotocols the client offered (parsed from Sec-WebSocket-Protocol).
@@ -194,7 +206,11 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 	}
 
 	challengeKey := r.Header.Get("Sec-Websocket-Key")
-	if !isValidChallengeKey(challengeKey) {
+	validChallengeKey := u.IsValidChallengeKey
+	if validChallengeKey == nil {
+		validChallengeKey = isValidChallengeKey
+	}
+	if !validChallengeKey(challengeKey) {
 		return u.returnError(w, r, http.StatusBadRequest, "websocket: not a websocket handshake: 'Sec-WebSocket-Key' header must be Base64 encoded value of 16-byte in length")
 	}
 

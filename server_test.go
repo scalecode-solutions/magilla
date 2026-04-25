@@ -86,6 +86,70 @@ func TestSubProtocolSelection(t *testing.T) {
 	}
 }
 
+func TestUpgraderIsValidChallengeKey(t *testing.T) {
+	cases := []struct {
+		name      string
+		key       string
+		validator func(string) bool
+		wantOK    bool
+	}{
+		{
+			name:      "default rejects non-16-byte key",
+			key:       "NOT-A-VALID-KEY",
+			validator: nil,
+			wantOK:    false,
+		},
+		{
+			name:      "custom validator accepts short key",
+			key:       "nintendo-switch",
+			validator: func(s string) bool { return s != "" },
+			wantOK:    true,
+		},
+		{
+			name:      "custom validator rejects empty",
+			key:       "",
+			validator: func(s string) bool { return s != "" },
+			wantOK:    false,
+		},
+		{
+			name:      "custom validator may allow base64 shorter than 16 bytes",
+			key:       "c2hvcnQ=",
+			validator: func(s string) bool { return s == "c2hvcnQ=" },
+			wantOK:    true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := &Upgrader{
+				IsValidChallengeKey: tc.validator,
+				CheckOrigin:         func(r *http.Request) bool { return true },
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+			req.Header.Set("Upgrade", "websocket")
+			req.Header.Set("Connection", "upgrade")
+			req.Header.Set("Sec-Websocket-Version", "13")
+			req.Header.Set("Sec-WebSocket-Key", tc.key)
+
+			rec := httptest.NewRecorder()
+			_, err := u.Upgrade(rec, req, nil)
+			// We can't complete a real upgrade without a hijackable
+			// ResponseWriter, so the key-validation result surfaces
+			// either as "key rejected → 400" or as a post-validation
+			// error about hijack failure.
+			if tc.wantOK {
+				if rec.Code == http.StatusBadRequest {
+					t.Errorf("validator accepted key but Upgrade returned 400: %v", err)
+				}
+			} else {
+				if rec.Code != http.StatusBadRequest {
+					t.Errorf("validator rejected key but Upgrade returned %d (err=%v)", rec.Code, err)
+				}
+			}
+		})
+	}
+}
+
 func TestNegotiateSubprotocolCallback(t *testing.T) {
 	// Callback overrides Subprotocols entirely.
 	var gotOffered []string
